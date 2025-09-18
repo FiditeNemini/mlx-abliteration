@@ -1,0 +1,16 @@
+# Core MLX and ML dependencies
+mlx
+mlx-lm
+torch
+
+# Hugging Face ecosystem
+huggingface-hub
+datasets
+
+# UI
+gradio
+
+# Development and testing
+pytest
+black
+flake8

@@ -1,0 +1,16 @@
+name: abliteration-env
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - mlx
+    - mlx-lm
+    - torch
+    - huggingface-hub
+    - datasets
+    - gradio
+    - pytest
+    - black
+    - flake8
