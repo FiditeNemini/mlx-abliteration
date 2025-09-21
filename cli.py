@@ -173,7 +173,7 @@ def run_abliteration(args: argparse.Namespace):
     abliteration_log = {
         "source_model": args.model,
         "harmless_dataset": args.harmless_dataset,
-        "harmful_dataset": args.harmful_dataset,,
+        "harmful_dataset": args.harmful_dataset,
         "probed_layers": layers_to_probe,
         "ablitation_vector_from_layer": use_layer_idx,
         "timestamp": datetime.utcnow().isoformat(),
