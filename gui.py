@@ -30,6 +30,9 @@ from typing import List, Dict, Generator, Tuple, Any
 # Add project root to the Python path
 sys.path.append(str(Path(__file__).parent))
 
+# Prepend the vendor directory to the Python path to load our patched model
+sys.path.insert(0, str(Path(__file__).parent / "core" / "vendor"))
+
 from core.asset_resolver import resolve_asset
 from core.abliteration import (
     ActivationProbeWrapper,
