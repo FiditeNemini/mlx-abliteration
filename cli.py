@@ -184,6 +184,7 @@ def run_abliteration(args: argparse.Namespace):
         output_dir=args.output_dir,
         model=model,
         tokenizer=tokenizer,
+        config=model.config,
         abliteration_log=abliteration_log,
         source_model_path=str(model_path)
     )
