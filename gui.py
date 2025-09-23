@@ -53,8 +53,13 @@ def get_mean_activations_from_dataset(
     config: Dict,
     desc: str,
     progress: gr.Progress,
+    probe_marker: Optional[str] = None,
 ) -> Dict[int, mx.array]:
     """Computes mean activations for a given dataset.
+
+    If a `probe_marker` is provided, it finds the marker in the tokenized
+    prompt and uses the activation of the token immediately preceding it.
+    Otherwise, it defaults to using the activation of the last token.
 
     Args:
         dataset: The dataset to process.
@@ -64,6 +69,7 @@ def get_mean_activations_from_dataset(
         config (Dict): The model's configuration dictionary.
         desc (str): A description for the progress bar.
         progress (gr.Progress): A Gradio Progress object to update the UI.
+        probe_marker (Optional[str]): A string marker to find for probing.
 
     Returns:
         Dict[int, mx.array]: A dictionary mapping layer indices to mean activations.
@@ -72,6 +78,8 @@ def get_mean_activations_from_dataset(
     mean_activations = {layer: mx.zeros(hidden_size) for layer in layers_to_probe}
     counts = {layer: 0 for layer in layers_to_probe}
     max_seq_len = config.get("max_position_embeddings", 4096)
+
+    marker_tokens = mx.array(tokenizer.encode(probe_marker)) if probe_marker else None
 
     for item in progress.tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
@@ -82,10 +90,25 @@ def get_mean_activations_from_dataset(
             tokens = tokens[:max_seq_len]
 
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
+
+        probe_idx = -1  # Default to the last token
+        if marker_tokens is not None:
+            # Search for the marker tokens in the main token sequence
+            token_list = tokens.tolist()
+            marker_list = marker_tokens.tolist()
+            found = False
+            for i in range(len(token_list) - len(marker_list) + 1):
+                if token_list[i:i + len(marker_list)] == marker_list:
+                    probe_idx = i - 1  # Use the token *before* the marker
+                    found = True
+                    break
+            if not found:
+                gr.Warning(f"Probe marker '{probe_marker}' not found in an item. Using last token.")
+
         for layer_idx, act in captured.items():
-            current_act = act[0, -1, :]
+            probe_act = act[0, probe_idx, :]
             counts[layer_idx] += 1
-            delta = current_act - mean_activations[layer_idx]
+            delta = probe_act - mean_activations[layer_idx]
             mean_activations[layer_idx] += delta / counts[layer_idx]
         mx.eval(list(mean_activations.values()))
     return mean_activations
@@ -97,6 +120,8 @@ def run_abliteration_stream(
     output_dir: str,
     layers_str: str,
     use_layer_idx: int,
+    ablation_strength: float,
+    probe_marker: str,
     progress=gr.Progress(),
 ) -> Generator[Tuple[str, None] | Tuple[str, str], None, None]:
     """
@@ -171,8 +196,8 @@ def run_abliteration_stream(
         layers_to_probe = list(range(num_layers)) if layers_str.lower() == 'all' else [int(x.strip()) for x in layers_str.split(",")]
         wrapper = ActivationProbeWrapper(model)
 
-        harmful_mean_activations = get_mean_activations_from_dataset(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", progress)
-        harmless_mean_activations = get_mean_activations_from_dataset(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", progress)
+        harmful_mean_activations = get_mean_activations_from_dataset(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", progress, probe_marker)
+        harmless_mean_activations = get_mean_activations_from_dataset(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", progress, probe_marker)
 
         yield log_and_yield("Activation probing complete.", {"event": "probing_end"}), None
 
@@ -184,7 +209,7 @@ def run_abliteration_stream(
         yield log_and_yield(f"Refusal vector computed from layer {actual_use_layer}.", {"event": "vector_computation_end", "inputs": {"use_layer": actual_use_layer}, "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}), None
 
         yield log_and_yield("Orthogonalizing Weights & Updating Model", {"event": "orthogonalization_start"}), None
-        ablated_params = get_ablated_parameters(model, refusal_vector)
+        ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=ablation_strength)
         model.update(ablated_params)
         mx.eval(model.parameters())
         yield log_and_yield("Model weights have been updated.", {"event": "orthogonalization_end"}), None
@@ -227,11 +252,13 @@ def create_ui() -> gr.Blocks:
                     with gr.TabItem("Advanced Parameters"):
                         layers_input = gr.Textbox(label="Layers to Probe", value="all", info="A comma-separated list of layer indices or 'all'.")
                         use_layer_slider = gr.Slider(minimum=-36, maximum=35, step=1, value=-1, label="Use Refusal Vector from Layer", info="The layer index for the refusal vector. Negative values count from the end.")
+                        strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Ablation Strength", info="The strength of the ablation effect. >1.0 amplifies the effect.")
+                        probe_marker_input = gr.Textbox(label="Probe Marker", placeholder="e.g., </thinking>", info="The string marker to probe activations before. Leave blank to use last token.")
                 start_button = gr.Button("Start Abliteration", variant="primary", scale=1)
             with gr.Column(scale=3):
                 log_output = gr.Textbox(label="Process Log", lines=20, interactive=False, autoscroll=True)
                 output_file_display = gr.File(label="Abliterated Model Path", interactive=False)
-        inputs = [model_input, harmless_ds_input, harmful_ds_input, output_dir_input, layers_input, use_layer_slider]
+        inputs = [model_input, harmless_ds_input, harmful_ds_input, output_dir_input, layers_input, use_layer_slider, strength_slider, probe_marker_input]
         for inp in inputs:
             inp.change(lambda: (None, None), outputs=[log_output, output_file_display])
         start_button.click(fn=run_abliteration_stream, inputs=inputs, outputs=[log_output, output_file_display])

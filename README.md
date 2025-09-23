@@ -71,6 +71,16 @@ This will start a local web server. Open the provided URL in your browser to acc
 - Monitor the process in real-time via a streaming log.
 - Receive a link to the final abliterated model directory upon completion.
 
+## 🔬 Experimental Features
+
+### Counterfactual Probing for "Thinking" Models
+
+For more advanced models that exhibit chain-of-thought reasoning, standard ablation can be less effective due to "signal contamination" from the thinking process. This toolkit includes an experimental feature for more precise, marker-based activation probing.
+
+This technique is designed to isolate the model's "decision" to refuse from its preceding "thinking" process, resulting in a cleaner and more effective refusal vector.
+
+**For a detailed explanation of the theory and usage instructions, please see the [Counterfactual Probing Documentation](./docs/counterfactual_ablation.md).**
+
 ## Troubleshooting
 
 - **Out of Memory Errors**: The abliteration process, especially activation probing, can be memory-intensive. If you encounter OOM errors, try using a smaller model or running on a machine with more RAM.

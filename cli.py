@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     abl_group = parser.add_argument_group("Abliteration Parameters")
     abl_group.add_argument("-l", "--layers", type=str, default="all", help="Layers to probe: 'all' or comma-separated list (e.g., '15,16').")
     abl_group.add_argument("-u", "--use-layer", type=int, default=-1, help="Layer index for the refusal vector. Default: -1 (last layer).")
+    abl_group.add_argument("-s", "--ablation-strength", type=float, default=1.0, help="Strength of the ablation effect.")
+    abl_group.add_argument("--probe-marker", type=str, default=None, help="String marker for precise activation probing (e.g., '</thinking>').")
     output_group = parser.add_argument_group("Output Configuration")
     output_group.add_argument("-o", "--output-dir", type=str, required=True, help="Directory to save the abliterated model.")
     output_group.add_argument("--cache-dir", type=str, default=".cache", help="Cache directory for downloads.")
@@ -84,8 +86,12 @@ def parse_layers(layers_str: str, num_model_layers: int) -> List[int]:
     except ValueError as e:
         raise ValueError(f"Invalid format for --layers: {e}") from e
 
-def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, layers_to_probe: List[int], desc: str) -> Dict[int, mx.array]:
+def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, layers_to_probe: List[int], desc: str, probe_marker: Optional[str] = None) -> Dict[int, mx.array]:
     """Computes the mean of activations for specified layers iteratively.
+
+    If a `probe_marker` is provided, it finds the marker in the tokenized
+    prompt and uses the activation of the token immediately preceding it.
+    Otherwise, it defaults to using the activation of the last token.
 
     Args:
         wrapper (ActivationProbeWrapper): The model wrapper for probing activations.
@@ -93,6 +99,7 @@ def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, la
         dataset: The dataset to iterate over.
         layers_to_probe (List[int]): A list of layer indices to probe.
         desc (str): A description for the tqdm progress bar.
+        probe_marker (Optional[str]): A string marker to find for probing.
 
     Returns:
         Dict[int, mx.array]: A dictionary mapping layer indices to their mean activation vectors.
@@ -100,6 +107,8 @@ def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, la
     mean_activations = {layer: None for layer in layers_to_probe}
     counts = {layer: 0 for layer in layers_to_probe}
     max_seq_len = getattr(wrapper, "max_seq_len", 4096)
+
+    marker_tokens = mx.array(tokenizer.encode(probe_marker)) if probe_marker else None
 
     for item in tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
@@ -110,13 +119,28 @@ def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, la
         tokens = mx.array(tokenizer.encode(prompt))[:max_seq_len]
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
 
+        probe_idx = -1  # Default to the last token
+        if marker_tokens is not None:
+            # Search for the marker tokens in the main token sequence
+            token_list = tokens.tolist()
+            marker_list = marker_tokens.tolist()
+            found = False
+            for i in range(len(token_list) - len(marker_list) + 1):
+                if token_list[i:i + len(marker_list)] == marker_list:
+                    probe_idx = i - 1  # Use the token *before* the marker
+                    found = True
+                    break
+            if not found:
+                tqdm.write(f"Warning: Probe marker '{probe_marker}' not found in an item. Using last token.")
+
         for layer_idx, act in captured.items():
-            final_token_act = act[0, -1, :]
+            # Use the activation at the calculated probe index
+            probe_act = act[0, probe_idx, :]
             if mean_activations[layer_idx] is None:
-                mean_activations[layer_idx] = final_token_act
+                mean_activations[layer_idx] = probe_act
             else:
                 counts[layer_idx] += 1
-                delta = final_token_act - mean_activations[layer_idx]
+                delta = probe_act - mean_activations[layer_idx]
                 mean_activations[layer_idx] += delta / counts[layer_idx]
         mx.eval(list(mean_activations.values()))
 
@@ -147,8 +171,8 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Probing activations", extra={"extra_info": {"component": "cli", "event": "probing_start"}})
     layers_to_probe = parse_layers(args.layers, num_layers)
     wrapper = ActivationProbeWrapper(model)
-    harmful_activations = get_mean_activations(wrapper, tokenizer, harmful_dataset, layers_to_probe, "Probing harmful prompts")
-    harmless_activations = get_mean_activations(wrapper, tokenizer, harmless_dataset, layers_to_probe, "Probing harmless prompts")
+    harmful_activations = get_mean_activations(wrapper, tokenizer, harmful_dataset, layers_to_probe, "Probing harmful prompts", args.probe_marker)
+    harmless_activations = get_mean_activations(wrapper, tokenizer, harmless_dataset, layers_to_probe, "Probing harmless prompts", args.probe_marker)
     logging.info("Activation probing complete", extra={"extra_info": {"component": "cli", "event": "probing_end"}})
 
     logging.info("Computing refusal vector", extra={"extra_info": {"component": "cli", "event": "vector_computation_start"}})
@@ -164,7 +188,7 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Refusal vector computed", extra={"extra_info": {"component": "cli", "event": "vector_computation_end", "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}})
 
     logging.info("Orthogonalizing weights and updating model", extra={"extra_info": {"component": "cli", "event": "orthogonalization_start"}})
-    ablated_params = get_ablated_parameters(model, refusal_vector)
+    ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=args.ablation_strength)
     model.update(ablated_params)
     mx.eval(model.parameters())
     logging.info("Model parameters updated", extra={"extra_info": {"component": "cli", "event": "orthogonalization_end"}})
@@ -184,6 +208,7 @@ def run_abliteration(args: argparse.Namespace):
         output_dir=args.output_dir,
         model=model,
         tokenizer=tokenizer,
+        config=model.config,
         abliteration_log=abliteration_log,
         source_model_path=str(model_path)
     )
