@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     abl_group = parser.add_argument_group("Abliteration Parameters")
     abl_group.add_argument("-l", "--layers", type=str, default="all", help="Layers to probe: 'all' or comma-separated list (e.g., '15,16').")
     abl_group.add_argument("-u", "--use-layer", type=int, default=-1, help="Layer index for the refusal vector. Default: -1 (last layer).")
+    abl_group.add_argument("-s", "--ablation-strength", type=float, default=1.0, help="Strength of the ablation effect.")
     output_group = parser.add_argument_group("Output Configuration")
     output_group.add_argument("-o", "--output-dir", type=str, required=True, help="Directory to save the abliterated model.")
     output_group.add_argument("--cache-dir", type=str, default=".cache", help="Cache directory for downloads.")
@@ -164,7 +165,7 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Refusal vector computed", extra={"extra_info": {"component": "cli", "event": "vector_computation_end", "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}})
 
     logging.info("Orthogonalizing weights and updating model", extra={"extra_info": {"component": "cli", "event": "orthogonalization_start"}})
-    ablated_params = get_ablated_parameters(model, refusal_vector)
+    ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=args.ablation_strength)
     model.update(ablated_params)
     mx.eval(model.parameters())
     logging.info("Model parameters updated", extra={"extra_info": {"component": "cli", "event": "orthogonalization_end"}})

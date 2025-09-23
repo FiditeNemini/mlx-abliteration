@@ -125,7 +125,7 @@ def calculate_refusal_direction(mean_harmful_activations: mx.array, mean_harmles
     return refusal_dir
 
 
-def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None) -> Dict:
+def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None, ablation_strength: float = 1.0) -> Dict:
     """
     Orthogonalizes the weights of target modules with respect to the refusal vector.
 
@@ -188,7 +188,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
             # Dequantize, ablate, and then re-quantize
             w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
             proj_W_on_v = v_proj @ (v_norm_T @ w_float)
-            w_ablated_float = w_float - proj_W_on_v
+            w_ablated_float = w_float - ablation_strength * proj_W_on_v
 
             # Verification check
             check_norm = mx.linalg.norm(v_norm_T @ w_ablated_float).item()
@@ -207,7 +207,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
             # Project the weight matrix onto the refusal vector
             proj_W_on_v = v_proj @ (v_norm_T @ W)
             # Subtract the projection to make the new weights orthogonal to the vector
-            W_ablated = W - proj_W_on_v
+            W_ablated = W - ablation_strength * proj_W_on_v
 
             # Verification check
             check_norm = mx.linalg.norm(v_norm_T @ W_ablated).item()

@@ -97,6 +97,7 @@ def run_abliteration_stream(
     output_dir: str,
     layers_str: str,
     use_layer_idx: int,
+    ablation_strength: float,
     progress=gr.Progress(),
 ) -> Generator[Tuple[str, None] | Tuple[str, str], None, None]:
     """
@@ -184,7 +185,7 @@ def run_abliteration_stream(
         yield log_and_yield(f"Refusal vector computed from layer {actual_use_layer}.", {"event": "vector_computation_end", "inputs": {"use_layer": actual_use_layer}, "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}), None
 
         yield log_and_yield("Orthogonalizing Weights & Updating Model", {"event": "orthogonalization_start"}), None
-        ablated_params = get_ablated_parameters(model, refusal_vector)
+        ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=ablation_strength)
         model.update(ablated_params)
         mx.eval(model.parameters())
         yield log_and_yield("Model weights have been updated.", {"event": "orthogonalization_end"}), None
@@ -227,11 +228,12 @@ def create_ui() -> gr.Blocks:
                     with gr.TabItem("Advanced Parameters"):
                         layers_input = gr.Textbox(label="Layers to Probe", value="all", info="A comma-separated list of layer indices or 'all'.")
                         use_layer_slider = gr.Slider(minimum=-36, maximum=35, step=1, value=-1, label="Use Refusal Vector from Layer", info="The layer index for the refusal vector. Negative values count from the end.")
+                        strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Ablation Strength", info="The strength of the ablation effect. >1.0 amplifies the effect.")
                 start_button = gr.Button("Start Abliteration", variant="primary", scale=1)
             with gr.Column(scale=3):
                 log_output = gr.Textbox(label="Process Log", lines=20, interactive=False, autoscroll=True)
                 output_file_display = gr.File(label="Abliterated Model Path", interactive=False)
-        inputs = [model_input, harmless_ds_input, harmful_ds_input, output_dir_input, layers_input, use_layer_slider]
+        inputs = [model_input, harmless_ds_input, harmful_ds_input, output_dir_input, layers_input, use_layer_slider, strength_slider]
         for inp in inputs:
             inp.change(lambda: (None, None), outputs=[log_output, output_file_display])
         start_button.click(fn=run_abliteration_stream, inputs=inputs, outputs=[log_output, output_file_display])
