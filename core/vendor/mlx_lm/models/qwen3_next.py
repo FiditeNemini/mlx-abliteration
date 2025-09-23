@@ -252,7 +252,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         ]
 
         state = None
-        if cache is not None:
+        if cache is not None and cache[1] is not None:
             state = cache[1]
 
         inv_scale = k.shape[-1] ** -0.5
