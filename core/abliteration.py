@@ -260,7 +260,9 @@ def save_ablated_model(
         with open(index_path, "r") as f:
             index_data = json.load(f)
 
-        metadata = index_data.get("metadata", {})
+        raw_metadata = index_data.get("metadata", {})
+        # Ensure all metadata values are strings, as required by safetensors
+        metadata = {str(k): str(v) for k, v in raw_metadata.items()}
         weight_map = index_data.get("weight_map", {})
 
         # Invert the weight map to group tensors by filename
@@ -290,7 +292,9 @@ def save_ablated_model(
         if source_sf_files:
             try:
                 with safe_open(source_sf_files[0], framework="mlx") as f:
-                    metadata = f.metadata()
+                    raw_metadata = f.metadata()
+                    # Ensure all metadata values are strings
+                    metadata = {str(k): str(v) for k, v in raw_metadata.items()} if raw_metadata else {}
             except Exception as e:
                 logger.error(f"Could not read metadata from source safetensors file: {e}", extra={"extra_info": {"event": "metadata_error", "error_message": str(e)}})
 
