@@ -233,55 +233,75 @@ def save_ablated_model(
     abliteration_log: Dict,
     source_model_path: Optional[str] = None,
 ):
-    """Saves the ablated model, tokenizer, and configuration.
-
-    Args:
-        output_dir (str): The directory to save the model files.
-        model (nn.Module): The ablated model.
-        tokenizer (Any): The model's tokenizer.
-        config (Dict): The model's configuration dictionary.
-        abliteration_log (Dict): A dictionary containing metadata about the
-            abliteration process.
-        source_model_path (Optional[str]): The path to the original model,
-            used for copying ancillary files.
-    """
+    """Saves the ablated model, tokenizer, and configuration, preserving sharding if present."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Saving abliterated model and tokenizer to {output_path}...", extra={"extra_info": {"event": "save_start", "inputs": {"output_dir": output_dir}}})
+    logger.info(f"Saving abliterated model to {output_path}...", extra={"extra_info": {"event": "save_start", "inputs": {"output_dir": output_dir}}})
 
     source_path = Path(source_model_path) if source_model_path else None
+    if not source_path or not source_path.is_dir():
+        raise ValueError("A valid source_model_path is required to save the ablated model.")
 
-    if source_path and source_path.is_dir():
-        logger.info(f"Copying ancillary files from {source_path}...", extra={"extra_info": {"event": "copy_ancillary_start", "inputs": {"source_path": str(source_path)}}})
-        for item in source_path.iterdir():
-            if item.is_file() and item.suffix not in [".safetensors", ".bin", ".pt"]:
-                shutil.copy2(item, output_path)
-        logger.info("Ancillary files copied", extra={"extra_info": {"event": "copy_ancillary_end"}})
+    # Copy all non-safetensors files from the source directory
+    logger.info(f"Copying ancillary files from {source_path}...", extra={"extra_info": {"event": "copy_ancillary_start"}})
+    for item in source_path.iterdir():
+        if not item.name.endswith(".safetensors"):
+            if item.is_file():
+                shutil.copy2(item, output_path / item.name)
+    logger.info("Ancillary files copied.", extra={"extra_info": {"event": "copy_ancillary_end"}})
 
-    metadata = {}
-    if source_path:
-        try:
-            source_sf_files = list(source_path.glob("*.safetensors"))
-            if source_sf_files:
+    # Get all ablated parameters from the model
+    ablated_params = dict(tree_flatten(model.parameters()))
+
+    # Check for a safetensors index file to handle sharding
+    index_path = source_path / "model.safetensors.index.json"
+    if index_path.is_file():
+        logger.info("Sharded model detected. Saving weights into respective shards.", extra={"extra_info": {"event": "sharded_save_start"}})
+        with open(index_path, "r") as f:
+            index_data = json.load(f)
+
+        metadata = index_data.get("metadata", {})
+        weight_map = index_data.get("weight_map", {})
+
+        # Invert the weight map to group tensors by filename
+        shards = {}
+        for tensor_name, filename in weight_map.items():
+            if filename not in shards:
+                shards[filename] = []
+            shards[filename].append(tensor_name)
+
+        # Save each shard
+        for filename, tensor_names in shards.items():
+            shard_data = {name: ablated_params[name] for name in tensor_names if name in ablated_params}
+            if shard_data:
+                logger.info(f"Saving {len(shard_data)} tensors to shard: {filename}", extra={"extra_info": {"event": "save_shard", "inputs": {"filename": filename, "tensor_count": len(shard_data)}}})
+                mx.save_safetensors(str(output_path / filename), shard_data, metadata=metadata)
+            else:
+                logger.warning(f"No tensors found for shard '{filename}'. It will be empty.", extra={"extra_info": {"event": "empty_shard", "inputs": {"filename": filename}}})
+
+        # Ensure the index file is also copied
+        shutil.copy2(index_path, output_path / index_path.name)
+
+    else:
+        # Handle non-sharded models (single safetensors file)
+        logger.info("Single-file model detected. Saving all weights to model.safetensors.", extra={"extra_info": {"event": "single_file_save_start"}})
+        source_sf_files = list(source_path.glob("*.safetensors"))
+        metadata = {}
+        if source_sf_files:
+            try:
                 with safe_open(source_sf_files[0], framework="mlx") as f:
                     metadata = f.metadata()
-                if metadata:
-                    logger.info("Successfully extracted metadata from source safetensors file.", extra={"extra_info": {"event": "metadata_extracted"}})
-        except Exception as e:
-            logger.error(f"Could not read metadata from source safetensors file: {e}", extra={"extra_info": {"event": "metadata_error", "error_message": str(e)}}, exc_info=True)
+            except Exception as e:
+                logger.error(f"Could not read metadata from source safetensors file: {e}", extra={"extra_info": {"event": "metadata_error", "error_message": str(e)}})
 
-    flat_params = tree_flatten(model.parameters())
-    mx.save_safetensors(str(output_path / "model.safetensors"), dict(flat_params), metadata=metadata)
-    logger.info("New model weights saved successfully with metadata.", extra={"extra_info": {"event": "weights_saved"}})
+        mx.save_safetensors(str(output_path / "model.safetensors"), ablated_params, metadata=metadata)
 
+    # Save tokenizer, config, and abliteration log
     tokenizer.save_pretrained(str(output_path))
-    
     if config:
         with open(output_path / "config.json", "w") as f:
             json.dump(config, f, indent=4)
-    else:
-        logger.warning("No config dictionary was provided. 'config.json' will be missing.", extra={"extra_info": {"event": "missing_config"}})
-
     with open(output_path / "abliteration_log.json", "w") as f:
         json.dump(abliteration_log, f, indent=4)
+
     logger.info("Model serialization complete.", extra={"extra_info": {"event": "save_end"}})

@@ -1,11 +1,3 @@
-# Python cache
 core/__pycache__/
 *.pyc
-
-# OS-specific
 .DS_Store
-
-# Generated files
-/generated_datasets/
-/outputs/
-/.cache/

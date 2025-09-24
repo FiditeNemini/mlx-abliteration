@@ -9,7 +9,6 @@ datasets
 
 # UI
 gradio
-PyYAML
 
 # Development and testing
 pytest

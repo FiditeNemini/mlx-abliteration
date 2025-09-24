@@ -32,14 +32,12 @@ def print_warn(text):
 def print_info(text):
     print(f"  ℹ️ {bcolors.OKCYAN}{text}{bcolors.ENDC}")
 
-def find_safetensors_file(directory: Path) -> Path:
-    """Finds the safetensors file in a directory."""
-    files = list(directory.glob("*.safetensors"))
+def find_safetensors_files(directory: Path) -> list[Path]:
+    """Finds all safetensors files in a directory and sorts them."""
+    files = sorted(list(directory.glob("*.safetensors")))
     if not files:
-        raise FileNotFoundError(f"No .safetensors file found in {directory}")
-    if len(files) > 1:
-        print_warn(f"Multiple .safetensors files found in {directory}. Using the first one: {files[0].name}")
-    return files[0]
+        raise FileNotFoundError(f"No .safetensors files found in {directory}")
+    return files
 
 def compare_json_files(path1: Path, path2: Path):
     """Loads and compares two JSON files."""
@@ -94,13 +92,27 @@ def inspect_safetensors(source_path: Path, new_path: Path):
         with safe_open(source_path, framework="mlx") as f:
             source_metadata = f.metadata()
             for key in f.keys():
-                source_tensors[key] = f.get_tensor(key) # This is just metadata here
+                try:
+                    source_tensors[key] = f.get_tensor(key)  # This is just metadata here
+                except TypeError as e:
+                    if 'bfloat16' in str(e):
+                        print_warn(f"Could not inspect tensor '{key}' due to bfloat16 issue. Skipping.")
+                        continue
+                    else:
+                        raise e
         
         new_tensors = {}
         with safe_open(new_path, framework="mlx") as f:
             new_metadata = f.metadata()
             for key in f.keys():
-                new_tensors[key] = f.get_tensor(key)
+                try:
+                    new_tensors[key] = f.get_tensor(key)
+                except TypeError as e:
+                    if 'bfloat16' in str(e):
+                        print_warn(f"Could not inspect tensor '{key}' due to bfloat16 issue. Skipping.")
+                        continue
+                    else:
+                        raise e
 
         # The most likely culprit for "format: null" is the top-level metadata
         if source_metadata and new_metadata and source_metadata == new_metadata:
@@ -173,9 +185,32 @@ def main():
     # Run Comparisons
     compare_directories(source_dir, new_dir)
     try:
-        source_sf_path = find_safetensors_file(source_dir)
-        new_sf_path = find_safetensors_file(new_dir)
-        inspect_safetensors(source_sf_path, new_sf_path)
+        source_sf_paths = find_safetensors_files(source_dir)
+        new_sf_paths = find_safetensors_files(new_dir)
+
+        if len(source_sf_paths) != len(new_sf_paths):
+            print_fail(f"Mismatch in number of .safetensors files: Source has {len(source_sf_paths)}, New has {len(new_sf_paths)}")
+        else:
+            print_ok(f"Found {len(source_sf_paths)} .safetensors files in both directories.")
+
+        # Compare corresponding files
+        source_map = {p.name: p for p in source_sf_paths}
+        new_map = {p.name: p for p in new_sf_paths}
+
+        all_sf_names = sorted(list(set(source_map.keys()) | set(new_map.keys())))
+
+        for name in all_sf_names:
+            print_header(f"--- Comparing file: {name} ---")
+            source_path = source_map.get(name)
+            new_path = new_map.get(name)
+
+            if source_path and new_path:
+                inspect_safetensors(source_path, new_path)
+            elif not source_path:
+                print_fail(f"File '{name}' is missing from the source directory.")
+            else:
+                print_fail(f"File '{name}' is missing from the new directory.")
+
     except FileNotFoundError as e:
         print_fail(str(e))
 
