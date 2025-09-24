@@ -260,24 +260,22 @@ def save_ablated_model(
             index_data = json.load(f)
         weight_map = index_data.get("weight_map", {})
 
-        # Find the longest common prefix between a tensor name and the weight_map keys
-        def find_shard_file(tensor_name, weight_map):
-            best_match = ""
-            for key in weight_map.keys():
-                if tensor_name.startswith(key) and len(key) > len(best_match):
-                    best_match = key
-            return weight_map.get(best_match)
-
-        # Distribute all ablated parameters into shard-specific dictionaries
+        # Use the weight_map as the source of truth for which tensors to save.
+        # This prevents any extraneous tensors created during ablation from being saved.
         shards_to_save = {}
-        for name, param in ablated_params.items():
-            filename = weight_map.get(name) or find_shard_file(name, weight_map)
-            if filename:
-                if filename not in shards_to_save:
-                    shards_to_save[filename] = {}
-                shards_to_save[filename][name] = param
-            else:
-                logger.warning(f"Could not find a shard for tensor '{name}'. It will not be saved.", extra={"extra_info": {"event": "tensor_not_saved", "inputs": {"tensor_name": name}}})
+        for name, filename in weight_map.items():
+            if name not in ablated_params:
+                logger.warning(f"Tensor '{name}' from source weight_map not found in the ablated model's parameters. It will be missing from the output.", extra={"extra_info": {"event": "tensor_missing_from_ablated", "inputs": {"tensor_name": name}}})
+                continue
+
+            if filename not in shards_to_save:
+                shards_to_save[filename] = {}
+            shards_to_save[filename][name] = ablated_params[name]
+
+        # Log any parameters that were ablated but will be discarded
+        ablated_but_not_saved = set(ablated_params.keys()) - set(weight_map.keys())
+        if ablated_but_not_saved:
+            logger.warning(f"The following {len(ablated_but_not_saved)} tensor(s) were generated during ablation but are not in the source model's weight map and will be discarded: {', '.join(ablated_but_not_saved)}", extra={"extra_info": {"event": "discarding_extra_tensors", "inputs": {"tensors": list(ablated_but_not_saved)}}})
 
         # Save each shard with its original metadata
         for filename, shard_data in shards_to_save.items():
