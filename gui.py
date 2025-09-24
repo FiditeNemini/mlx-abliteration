@@ -227,8 +227,10 @@ def run_abliteration_stream(
         # Determine the correct output path to display (directory for sharded, file for single)
         output_index_path = output_path / "model.safetensors.index.json"
         if output_index_path.is_file():
-            final_output_path = str(output_path.resolve())
+            # For sharded models, return the path to the index file itself
+            final_output_path = str(output_index_path.resolve())
         else:
+            # For single-file models, return the path to the safetensors file
             final_output_path = str((output_path / "model.safetensors").resolve())
 
         yield log_and_yield("✅ Abliteration process completed successfully.", {"event": "main_success", "actual_output": {"output_path": final_output_path}}), final_output_path
