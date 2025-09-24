@@ -25,7 +25,7 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Dict, Generator, Tuple, Any, Optional
+from typing import List, Dict, Generator, Tuple, Any
 
 # Add project root to the Python path
 sys.path.append(str(Path(__file__).parent))
