@@ -224,7 +224,14 @@ def run_abliteration_stream(
             str(output_path), model, tokenizer, model_config, abliteration_log, source_model_path=str(model_path)
         )
 
-        yield log_and_yield("✅ Abliteration process completed successfully.", {"event": "main_success", "actual_output": {"output_path": str(output_path.resolve())}}), str((output_path / "model.safetensors").resolve())
+        # Determine the correct output path to display (directory for sharded, file for single)
+        output_index_path = output_path / "model.safetensors.index.json"
+        if output_index_path.is_file():
+            final_output_path = str(output_path.resolve())
+        else:
+            final_output_path = str((output_path / "model.safetensors").resolve())
+
+        yield log_and_yield("✅ Abliteration process completed successfully.", {"event": "main_success", "actual_output": {"output_path": final_output_path}}), final_output_path
 
     except Exception as e:
         logging.error("An error occurred during abliteration", extra={"extra_info": {"component": "gui", "event": "main_error", "error_message": str(e)}}, exc_info=True)

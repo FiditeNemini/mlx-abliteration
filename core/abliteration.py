@@ -242,7 +242,7 @@ def save_ablated_model(
     if not source_path or not source_path.is_dir():
         raise ValueError("A valid source_model_path is required to save the ablated model.")
 
-    # Copy all non-safetensors files from the source directory
+    # Copy all non-safetensors files from the source directory first
     logger.info(f"Copying ancillary files from {source_path}...", extra={"extra_info": {"event": "copy_ancillary_start"}})
     for item in source_path.iterdir():
         if not item.name.endswith(".safetensors"):
@@ -253,39 +253,54 @@ def save_ablated_model(
     # Get all ablated parameters from the model
     ablated_params = dict(tree_flatten(model.parameters()))
 
-    # Check for a safetensors index file to handle sharding
     index_path = source_path / "model.safetensors.index.json"
     if index_path.is_file():
         logger.info("Sharded model detected. Saving weights into respective shards.", extra={"extra_info": {"event": "sharded_save_start"}})
         with open(index_path, "r") as f:
             index_data = json.load(f)
-
-        raw_metadata = index_data.get("metadata", {})
-        # Ensure all metadata values are strings, as required by safetensors
-        metadata = {str(k): str(v) for k, v in raw_metadata.items()}
         weight_map = index_data.get("weight_map", {})
 
-        # Invert the weight map to group tensors by filename
-        shards = {}
-        for tensor_name, filename in weight_map.items():
-            if filename not in shards:
-                shards[filename] = []
-            shards[filename].append(tensor_name)
+        # Find the longest common prefix between a tensor name and the weight_map keys
+        def find_shard_file(tensor_name, weight_map):
+            best_match = ""
+            for key in weight_map.keys():
+                if tensor_name.startswith(key) and len(key) > len(best_match):
+                    best_match = key
+            return weight_map.get(best_match)
 
-        # Save each shard
-        for filename, tensor_names in shards.items():
-            shard_data = {name: ablated_params[name] for name in tensor_names if name in ablated_params}
-            if shard_data:
-                logger.info(f"Saving {len(shard_data)} tensors to shard: {filename}", extra={"extra_info": {"event": "save_shard", "inputs": {"filename": filename, "tensor_count": len(shard_data)}}})
-                mx.save_safetensors(str(output_path / filename), shard_data, metadata=metadata)
+        # Distribute all ablated parameters into shard-specific dictionaries
+        shards_to_save = {}
+        for name, param in ablated_params.items():
+            filename = weight_map.get(name) or find_shard_file(name, weight_map)
+            if filename:
+                if filename not in shards_to_save:
+                    shards_to_save[filename] = {}
+                shards_to_save[filename][name] = param
             else:
-                logger.warning(f"No tensors found for shard '{filename}'. It will be empty.", extra={"extra_info": {"event": "empty_shard", "inputs": {"filename": filename}}})
+                logger.warning(f"Could not find a shard for tensor '{name}'. It will not be saved.", extra={"extra_info": {"event": "tensor_not_saved", "inputs": {"tensor_name": name}}})
 
-        # Ensure the index file is also copied
-        shutil.copy2(index_path, output_path / index_path.name)
+        # Save each shard with its original metadata
+        for filename, shard_data in shards_to_save.items():
+            source_shard_path = source_path / filename
+            metadata = {}
+            if source_shard_path.is_file():
+                try:
+                    with safe_open(source_shard_path, framework="mlx") as f:
+                        raw_metadata = f.metadata()
+                        if raw_metadata:
+                            metadata = {str(k): str(v) for k, v in raw_metadata.items()}
+                except Exception as e:
+                    logger.error(f"Could not read metadata from source shard {filename}: {e}", extra={"extra_info": {"event": "shard_metadata_error", "inputs": {"filename": filename}, "error_message": str(e)}})
+
+            logger.info(f"Saving {len(shard_data)} tensors to shard: {filename}", extra={"extra_info": {"event": "save_shard", "inputs": {"filename": filename, "tensor_count": len(shard_data)}}})
+            mx.save_safetensors(str(output_path / filename), shard_data, metadata=metadata)
+
+        # Ensure the index file is also copied (it might have been missed if not in the initial loop)
+        if not (output_path / index_path.name).exists():
+            shutil.copy2(index_path, output_path / index_path.name)
 
     else:
-        # Handle non-sharded models (single safetensors file)
+        # Handle non-sharded models
         logger.info("Single-file model detected. Saving all weights to model.safetensors.", extra={"extra_info": {"event": "single_file_save_start"}})
         source_sf_files = list(source_path.glob("*.safetensors"))
         metadata = {}
@@ -293,18 +308,15 @@ def save_ablated_model(
             try:
                 with safe_open(source_sf_files[0], framework="mlx") as f:
                     raw_metadata = f.metadata()
-                    # Ensure all metadata values are strings
-                    metadata = {str(k): str(v) for k, v in raw_metadata.items()} if raw_metadata else {}
+                    if raw_metadata:
+                        metadata = {str(k): str(v) for k, v in raw_metadata.items()}
             except Exception as e:
                 logger.error(f"Could not read metadata from source safetensors file: {e}", extra={"extra_info": {"event": "metadata_error", "error_message": str(e)}})
 
         mx.save_safetensors(str(output_path / "model.safetensors"), ablated_params, metadata=metadata)
 
-    # Save tokenizer, config, and abliteration log
+    # Save tokenizer and abliteration log
     tokenizer.save_pretrained(str(output_path))
-    if config:
-        with open(output_path / "config.json", "w") as f:
-            json.dump(config, f, indent=4)
     with open(output_path / "abliteration_log.json", "w") as f:
         json.dump(abliteration_log, f, indent=4)
 
