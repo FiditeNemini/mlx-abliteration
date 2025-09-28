@@ -125,7 +125,7 @@ def calculate_refusal_direction(mean_harmful_activations: mx.array, mean_harmles
     return refusal_dir
 
 
-def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None) -> Dict:
+def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None, ablation_strength: float = 1.0) -> Dict:
     """
     Orthogonalizes the weights of target modules with respect to the refusal vector.
 
@@ -188,7 +188,12 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
             # Dequantize, ablate, and then re-quantize
             w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
             proj_W_on_v = v_proj @ (v_norm_T @ w_float)
-            w_ablated_float = w_float - proj_W_on_v
+            w_ablated_float = w_float - ablation_strength * proj_W_on_v
+
+            # Verification check
+            check_norm = mx.linalg.norm(v_norm_T @ w_ablated_float).item()
+            logger.info(f"Orthogonalization check for {key}: norm is {check_norm:.4e}", extra={"extra_info": {"event": "ortho_check", "inputs": {"key": key}, "actual_output": {"norm": check_norm}}})
+
             new_w, new_scales, new_biases = mx.quantize(w_ablated_float, module.group_size, module.bits)
 
             new_flat_params.extend([(key, new_w), (scales_key, new_scales)])
@@ -202,7 +207,12 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
             # Project the weight matrix onto the refusal vector
             proj_W_on_v = v_proj @ (v_norm_T @ W)
             # Subtract the projection to make the new weights orthogonal to the vector
-            W_ablated = W - proj_W_on_v
+            W_ablated = W - ablation_strength * proj_W_on_v
+
+            # Verification check
+            check_norm = mx.linalg.norm(v_norm_T @ W_ablated).item()
+            logger.info(f"Orthogonalization check for {key}: norm is {check_norm:.4e}", extra={"extra_info": {"event": "ortho_check", "inputs": {"key": key}, "actual_output": {"norm": check_norm}}})
+
             new_flat_params.append((key, W_ablated))
             modified_count += 1
 
@@ -223,55 +233,89 @@ def save_ablated_model(
     abliteration_log: Dict,
     source_model_path: Optional[str] = None,
 ):
-    """Saves the ablated model, tokenizer, and configuration.
-
-    Args:
-        output_dir (str): The directory to save the model files.
-        model (nn.Module): The ablated model.
-        tokenizer (Any): The model's tokenizer.
-        config (Dict): The model's configuration dictionary.
-        abliteration_log (Dict): A dictionary containing metadata about the
-            abliteration process.
-        source_model_path (Optional[str]): The path to the original model,
-            used for copying ancillary files.
-    """
+    """Saves the ablated model, tokenizer, and configuration, preserving sharding if present."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Saving abliterated model and tokenizer to {output_path}...", extra={"extra_info": {"event": "save_start", "inputs": {"output_dir": output_dir}}})
+    logger.info(f"Saving abliterated model to {output_path}...", extra={"extra_info": {"event": "save_start", "inputs": {"output_dir": output_dir}}})
 
     source_path = Path(source_model_path) if source_model_path else None
+    if not source_path or not source_path.is_dir():
+        raise ValueError("A valid source_model_path is required to save the ablated model.")
 
-    if source_path and source_path.is_dir():
-        logger.info(f"Copying ancillary files from {source_path}...", extra={"extra_info": {"event": "copy_ancillary_start", "inputs": {"source_path": str(source_path)}}})
-        for item in source_path.iterdir():
-            if item.is_file() and item.suffix not in [".safetensors", ".bin", ".pt"]:
-                shutil.copy2(item, output_path)
-        logger.info("Ancillary files copied", extra={"extra_info": {"event": "copy_ancillary_end"}})
+    # Copy all non-safetensors files from the source directory first
+    logger.info(f"Copying ancillary files from {source_path}...", extra={"extra_info": {"event": "copy_ancillary_start"}})
+    for item in source_path.iterdir():
+        if not item.name.endswith(".safetensors"):
+            if item.is_file():
+                shutil.copy2(item, output_path / item.name)
+    logger.info("Ancillary files copied.", extra={"extra_info": {"event": "copy_ancillary_end"}})
 
-    metadata = {}
-    if source_path:
-        try:
-            source_sf_files = list(source_path.glob("*.safetensors"))
-            if source_sf_files:
-                with safe_open(source_sf_files[0], framework="mlx") as f:
-                    metadata = f.metadata()
-                if metadata:
-                    logger.info("Successfully extracted metadata from source safetensors file.", extra={"extra_info": {"event": "metadata_extracted"}})
-        except Exception as e:
-            logger.error(f"Could not read metadata from source safetensors file: {e}", extra={"extra_info": {"event": "metadata_error", "error_message": str(e)}}, exc_info=True)
+    # Get all ablated parameters from the model
+    ablated_params = dict(tree_flatten(model.parameters()))
 
-    flat_params = tree_flatten(model.parameters())
-    mx.save_safetensors(str(output_path / "model.safetensors"), dict(flat_params), metadata=metadata)
-    logger.info("New model weights saved successfully with metadata.", extra={"extra_info": {"event": "weights_saved"}})
+    index_path = source_path / "model.safetensors.index.json"
+    if index_path.is_file():
+        logger.info("Sharded model detected. Saving weights into respective shards.", extra={"extra_info": {"event": "sharded_save_start"}})
+        with open(index_path, "r") as f:
+            index_data = json.load(f)
+        weight_map = index_data.get("weight_map", {})
 
-    tokenizer.save_pretrained(str(output_path))
-    
-    if config:
-        with open(output_path / "config.json", "w") as f:
-            json.dump(config, f, indent=4)
+        # Use the weight_map as the source of truth for which tensors to save.
+        # This prevents any extraneous tensors created during ablation from being saved.
+        shards_to_save = {}
+        for name, filename in weight_map.items():
+            if name not in ablated_params:
+                logger.warning(f"Tensor '{name}' from source weight_map not found in the ablated model's parameters. It will be missing from the output.", extra={"extra_info": {"event": "tensor_missing_from_ablated", "inputs": {"tensor_name": name}}})
+                continue
+
+            if filename not in shards_to_save:
+                shards_to_save[filename] = {}
+            shards_to_save[filename][name] = ablated_params[name]
+
+        # Log any parameters that were ablated but will be discarded
+        ablated_but_not_saved = set(ablated_params.keys()) - set(weight_map.keys())
+        if ablated_but_not_saved:
+            logger.warning(f"The following {len(ablated_but_not_saved)} tensor(s) were generated during ablation but are not in the source model's weight map and will be discarded: {', '.join(ablated_but_not_saved)}", extra={"extra_info": {"event": "discarding_extra_tensors", "inputs": {"tensors": list(ablated_but_not_saved)}}})
+
+        # Save each shard with its original metadata
+        for filename, shard_data in shards_to_save.items():
+            source_shard_path = source_path / filename
+            metadata = {}
+            if source_shard_path.is_file():
+                try:
+                    with safe_open(source_shard_path, framework="mlx") as f:
+                        raw_metadata = f.metadata()
+                        if raw_metadata:
+                            metadata = {str(k): str(v) for k, v in raw_metadata.items()}
+                except Exception as e:
+                    logger.error(f"Could not read metadata from source shard {filename}: {e}", extra={"extra_info": {"event": "shard_metadata_error", "inputs": {"filename": filename}, "error_message": str(e)}})
+
+            logger.info(f"Saving {len(shard_data)} tensors to shard: {filename}", extra={"extra_info": {"event": "save_shard", "inputs": {"filename": filename, "tensor_count": len(shard_data)}}})
+            mx.save_safetensors(str(output_path / filename), shard_data, metadata=metadata)
+
+        # Ensure the index file is also copied (it might have been missed if not in the initial loop)
+        if not (output_path / index_path.name).exists():
+            shutil.copy2(index_path, output_path / index_path.name)
+
     else:
-        logger.warning("No config dictionary was provided. 'config.json' will be missing.", extra={"extra_info": {"event": "missing_config"}})
+        # Handle non-sharded models
+        logger.info("Single-file model detected. Saving all weights to model.safetensors.", extra={"extra_info": {"event": "single_file_save_start"}})
+        source_sf_files = list(source_path.glob("*.safetensors"))
+        metadata = {}
+        if source_sf_files:
+            try:
+                with safe_open(source_sf_files[0], framework="mlx") as f:
+                    raw_metadata = f.metadata()
+                    if raw_metadata:
+                        metadata = {str(k): str(v) for k, v in raw_metadata.items()}
+            except Exception as e:
+                logger.error(f"Could not read metadata from source safetensors file: {e}", extra={"extra_info": {"event": "metadata_error", "error_message": str(e)}})
 
+        mx.save_safetensors(str(output_path / "model.safetensors"), ablated_params, metadata=metadata)
+
+    # Save tokenizer and abliteration log
+    tokenizer.save_pretrained(str(output_path))
     with open(output_path / "abliteration_log.json", "w") as f:
         json.dump(abliteration_log, f, indent=4)
+
     logger.info("Model serialization complete.", extra={"extra_info": {"event": "save_end"}})

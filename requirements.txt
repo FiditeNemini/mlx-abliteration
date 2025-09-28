@@ -7,6 +7,10 @@ torch
 huggingface-hub
 datasets
 
+# Utilities
+pyyaml
+tqdm
+
 # UI
 gradio
 
