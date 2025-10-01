@@ -79,7 +79,11 @@ def get_mean_activations_from_dataset(
     counts = {layer: 0 for layer in layers_to_probe}
     max_seq_len = config.get("max_position_embeddings", 4096)
 
-    marker_tokens = mx.array(tokenizer.encode(probe_marker)) if probe_marker else None
+    # Gracefully handle empty or whitespace-only strings from the UI
+    if probe_marker and probe_marker.strip():
+        marker_tokens = mx.array(tokenizer.encode(probe_marker))
+    else:
+        marker_tokens = None
 
     for item in progress.tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
