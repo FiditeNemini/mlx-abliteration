@@ -44,6 +44,7 @@ from core.abliteration import (
     save_ablated_model,
 )
 from core.logging_config import setup_structured_logging
+from core.utils import extract_eot_from_chat_template
 
 def parse_args() -> argparse.Namespace:
     """Parses command-line arguments.
@@ -181,6 +182,26 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Loading model and datasets", extra={"extra_info": {"component": "cli", "event": "loading_start"}})
     model, tokenizer = mlx_lm.load(str(model_path))
 
+    # Determine the probe marker with fallback logic
+    final_probe_marker = args.probe_marker
+    if not final_probe_marker or not final_probe_marker.strip():
+        logging.info("No probe marker provided by user. Checking tokenizer config...", extra={"extra_info": {"component": "cli", "event": "probe_marker_fallback_start"}})
+        tokenizer_config_path = Path(model_path) / "tokenizer_config.json"
+        if tokenizer_config_path.is_file():
+            with open(tokenizer_config_path, "r") as f:
+                tokenizer_config = json.load(f)
+            chat_template = tokenizer_config.get("chat_template")
+            if chat_template:
+                found_marker = extract_eot_from_chat_template(chat_template)
+                if found_marker:
+                    final_probe_marker = found_marker
+                    logging.info(f"Found probe marker '{found_marker}' in chat_template.", extra={"extra_info": {"component": "cli", "event": "probe_marker_found_in_config", "actual_output": {"marker": found_marker}}})
+
+    if not final_probe_marker or not final_probe_marker.strip():
+        logging.info("No probe marker found. Defaulting to last token.", extra={"extra_info": {"component": "cli", "event": "probe_marker_fallback_end"}})
+        final_probe_marker = None
+
+
     config_path = Path(model_path) / "config.json"
     if not config_path.is_file():
         raise FileNotFoundError(f"Could not find 'config.json' in the model directory: {model_path}")
@@ -195,8 +216,8 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Probing activations", extra={"extra_info": {"component": "cli", "event": "probing_start"}})
     layers_to_probe = parse_layers(args.layers, num_layers)
     wrapper = ActivationProbeWrapper(model)
-    harmful_activations = get_mean_activations(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", args.probe_marker)
-    harmless_activations = get_mean_activations(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", args.probe_marker)
+    harmful_activations = get_mean_activations(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", final_probe_marker)
+    harmless_activations = get_mean_activations(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", final_probe_marker)
     logging.info("Activation probing complete", extra={"extra_info": {"component": "cli", "event": "probing_end"}})
 
     logging.info("Computing refusal vector", extra={"extra_info": {"component": "cli", "event": "vector_computation_start"}})

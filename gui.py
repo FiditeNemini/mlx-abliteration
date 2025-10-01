@@ -41,6 +41,7 @@ from core.abliteration import (
     save_ablated_model,
 )
 from core.logging_config import setup_structured_logging
+from core.utils import extract_eot_from_chat_template
 import mlx.core as mx
 import mlx_lm
 from datasets import load_dataset
@@ -188,15 +189,35 @@ def run_abliteration_stream(
         harmful_ds_path = str(resolve_asset(harmful_id, "datasets", cache_dir))
         yield log_and_yield(f"Assets resolved. Output will be saved to: {output_path.resolve()}", {"event": "asset_resolution_end", "actual_output": {"output_path": str(output_path.resolve())}}), None
 
-        yield log_and_yield("Loading Model, Tokenizer, and Config", {"event": "loading_start"}), None
+        yield log_and_yield("Loading Model and Tokenizer", {"event": "loading_start"}), None
         model, tokenizer = mlx_lm.load(str(model_path))
+        yield log_and_yield("Model and tokenizer loaded successfully.", {"event": "loading_end"}), None
+
+        # Determine the probe marker with fallback logic
+        final_probe_marker = probe_marker
+        if not final_probe_marker or not final_probe_marker.strip():
+            yield log_and_yield("No probe marker provided by user. Checking tokenizer config...", {"event": "probe_marker_fallback_start"}), None
+            tokenizer_config_path = Path(model_path) / "tokenizer_config.json"
+            if tokenizer_config_path.is_file():
+                with open(tokenizer_config_path, "r") as f:
+                    tokenizer_config = json.load(f)
+                chat_template = tokenizer_config.get("chat_template")
+                if chat_template:
+                    found_marker = extract_eot_from_chat_template(chat_template)
+                    if found_marker:
+                        final_probe_marker = found_marker
+                        yield log_and_yield(f"Found probe marker '{found_marker}' in chat_template.", {"event": "probe_marker_found_in_config", "actual_output": {"marker": found_marker}}), None
+
+        if not final_probe_marker or not final_probe_marker.strip():
+            yield log_and_yield("No probe marker found. Defaulting to last token.", {"event": "probe_marker_fallback_end"}), None
+            final_probe_marker = None
+
 
         config_path = Path(model_path) / "config.json"
         if not config_path.is_file():
             raise FileNotFoundError(f"Could not find 'config.json' in the model directory: {model_path}")
         with open(config_path, "r") as f:
             model_config = json.load(f)
-        yield log_and_yield("Model, tokenizer, and config.json loaded successfully.", {"event": "loading_end"}), None
 
         num_layers = model_config["num_hidden_layers"]
         yield log_and_yield(f"Model '{model_id}' loaded with {num_layers} layers.", {"event": "model_info", "actual_output": {"num_layers": num_layers}}), None
@@ -208,8 +229,8 @@ def run_abliteration_stream(
         layers_to_probe = list(range(num_layers)) if layers_str.lower() == 'all' else [int(x.strip()) for x in layers_str.split(",")]
         wrapper = ActivationProbeWrapper(model)
 
-        harmful_mean_activations = get_mean_activations_from_dataset(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", progress, probe_marker)
-        harmless_mean_activations = get_mean_activations_from_dataset(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", progress, probe_marker)
+        harmful_mean_activations = get_mean_activations_from_dataset(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", progress, final_probe_marker)
+        harmless_mean_activations = get_mean_activations_from_dataset(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", progress, final_probe_marker)
 
         yield log_and_yield("Activation probing complete.", {"event": "probing_end"}), None
 
@@ -274,7 +295,7 @@ def create_ui() -> gr.Blocks:
                         layers_input = gr.Textbox(label="Layers to Probe", value="all", info="A comma-separated list of layer indices or 'all'.")
                         use_layer_slider = gr.Slider(minimum=-36, maximum=35, step=1, value=-1, label="Use Refusal Vector from Layer", info="The layer index for the refusal vector. Negative values count from the end.")
                         strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Ablation Strength", info="The strength of the ablation effect. >1.0 amplifies the effect.")
-                        probe_marker_input = gr.Textbox(label="Probe Marker", placeholder="e.g., </thinking>", info="The string marker to probe activations before. Leave blank to use last token.")
+                        probe_marker_input = gr.Code(label="Probe Marker", placeholder="e.g., </think>", info="The string marker to probe activations after. Defaults to model's chat template or last token if blank.", language="text")
                 start_button = gr.Button("Start Abliteration", variant="primary", scale=1)
             with gr.Column(scale=3):
                 log_output = gr.Textbox(label="Process Log", lines=20, interactive=False, autoscroll=True)
