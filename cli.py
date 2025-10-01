@@ -120,7 +120,7 @@ def get_mean_activations(
     max_seq_len = config.get("max_position_embeddings", 4096)
 
     if probe_marker and probe_marker.strip():
-        marker_tokens = mx.array(tokenizer.encode(probe_marker))
+        marker_tokens = mx.array(tokenizer.encode(probe_marker, add_special_tokens=False))
     else:
         marker_tokens = None
 

@@ -81,7 +81,7 @@ def get_mean_activations_from_dataset(
 
     # Gracefully handle empty or whitespace-only strings from the UI
     if probe_marker and probe_marker.strip():
-        marker_tokens = mx.array(tokenizer.encode(probe_marker))
+        marker_tokens = mx.array(tokenizer.encode(probe_marker, add_special_tokens=False))
     else:
         marker_tokens = None
 
