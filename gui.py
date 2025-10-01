@@ -93,15 +93,23 @@ def get_mean_activations_from_dataset(
 
         probe_idx = -1  # Default to the last token
         if marker_tokens is not None:
-            # Search for the marker tokens in the main token sequence
             token_list = tokens.tolist()
             marker_list = marker_tokens.tolist()
             found = False
-            for i in range(len(token_list) - len(marker_list) + 1):
+            # Search for the last occurrence of the marker by searching backwards
+            for i in range(len(token_list) - len(marker_list), -1, -1):
                 if token_list[i:i + len(marker_list)] == marker_list:
-                    probe_idx = i - 1  # Use the token *before* the marker
-                    found = True
-                    break
+                    # The correct index is for the token *after* the marker sequence
+                    potential_idx = i + len(marker_list)
+                    # Ensure the index is within the sequence bounds
+                    if potential_idx < len(token_list):
+                        probe_idx = potential_idx
+                        found = True
+                    else:
+                        # Marker is at the very end, fallback to last token
+                        probe_idx = -1
+                    break  # Found the last marker, stop searching
+
             if not found:
                 gr.Warning(f"Probe marker '{probe_marker}' not found in an item. Using last token.")
 
