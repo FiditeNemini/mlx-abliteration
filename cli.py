@@ -24,9 +24,10 @@ Dependencies:
 import argparse
 import logging
 import sys
+import json
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 
 import mlx.core as mx
 from datasets import load_dataset
@@ -86,29 +87,42 @@ def parse_layers(layers_str: str, num_model_layers: int) -> List[int]:
     except ValueError as e:
         raise ValueError(f"Invalid format for --layers: {e}") from e
 
-def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, layers_to_probe: List[int], desc: str, probe_marker: Optional[str] = None) -> Dict[int, mx.array]:
-    """Computes the mean of activations for specified layers iteratively.
+def get_mean_activations(
+    dataset,
+    wrapper: ActivationProbeWrapper,
+    tokenizer: Any,
+    layers_to_probe: List[int],
+    config: Dict,
+    desc: str,
+    probe_marker: Optional[str] = None,
+) -> Dict[int, mx.array]:
+    """Computes mean activations for a given dataset using Welford's algorithm.
 
     If a `probe_marker` is provided, it finds the marker in the tokenized
-    prompt and uses the activation of the token immediately preceding it.
+    prompt and uses the activation of the token immediately following it.
     Otherwise, it defaults to using the activation of the last token.
 
     Args:
-        wrapper (ActivationProbeWrapper): The model wrapper for probing activations.
-        tokenizer: The tokenizer for the model.
-        dataset: The dataset to iterate over.
+        dataset: The dataset to process.
+        wrapper (ActivationProbeWrapper): The model wrapper for probing.
+        tokenizer (Any): The tokenizer.
         layers_to_probe (List[int]): A list of layer indices to probe.
-        desc (str): A description for the tqdm progress bar.
+        config (Dict): The model's configuration dictionary.
+        desc (str): A description for the progress bar.
         probe_marker (Optional[str]): A string marker to find for probing.
 
     Returns:
-        Dict[int, mx.array]: A dictionary mapping layer indices to their mean activation vectors.
+        Dict[int, mx.array]: A dictionary mapping layer indices to mean activations.
     """
-    mean_activations = {layer: None for layer in layers_to_probe}
+    hidden_size = config["hidden_size"]
+    mean_activations = {layer: mx.zeros(hidden_size) for layer in layers_to_probe}
     counts = {layer: 0 for layer in layers_to_probe}
-    max_seq_len = getattr(wrapper, "max_seq_len", 4096)
+    max_seq_len = config.get("max_position_embeddings", 4096)
 
-    marker_tokens = mx.array(tokenizer.encode(probe_marker)) if probe_marker else None
+    if probe_marker and probe_marker.strip():
+        marker_tokens = mx.array(tokenizer.encode(probe_marker))
+    else:
+        marker_tokens = None
 
     for item in tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
@@ -116,32 +130,35 @@ def get_mean_activations(wrapper: ActivationProbeWrapper, tokenizer, dataset, la
             tqdm.write("Skipping empty prompt.")
             continue
         
-        tokens = mx.array(tokenizer.encode(prompt))[:max_seq_len]
+        tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
+        if len(tokens) > max_seq_len:
+            tokens = tokens[:max_seq_len]
+
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
 
         probe_idx = -1  # Default to the last token
         if marker_tokens is not None:
-            # Search for the marker tokens in the main token sequence
             token_list = tokens.tolist()
             marker_list = marker_tokens.tolist()
             found = False
-            for i in range(len(token_list) - len(marker_list) + 1):
+            # Search for the last occurrence of the marker by searching backwards
+            for i in range(len(token_list) - len(marker_list), -1, -1):
                 if token_list[i:i + len(marker_list)] == marker_list:
-                    probe_idx = i - 1  # Use the token *before* the marker
-                    found = True
+                    potential_idx = i + len(marker_list)
+                    if potential_idx < len(token_list):
+                        probe_idx = potential_idx
+                        found = True
+                    else:
+                        probe_idx = -1
                     break
             if not found:
                 tqdm.write(f"Warning: Probe marker '{probe_marker}' not found in an item. Using last token.")
 
         for layer_idx, act in captured.items():
-            # Use the activation at the calculated probe index
             probe_act = act[0, probe_idx, :]
-            if mean_activations[layer_idx] is None:
-                mean_activations[layer_idx] = probe_act
-            else:
-                counts[layer_idx] += 1
-                delta = probe_act - mean_activations[layer_idx]
-                mean_activations[layer_idx] += delta / counts[layer_idx]
+            counts[layer_idx] += 1
+            delta = probe_act - mean_activations[layer_idx]
+            mean_activations[layer_idx] += delta / counts[layer_idx]
         mx.eval(list(mean_activations.values()))
 
     return mean_activations
@@ -163,16 +180,23 @@ def run_abliteration(args: argparse.Namespace):
 
     logging.info("Loading model and datasets", extra={"extra_info": {"component": "cli", "event": "loading_start"}})
     model, tokenizer = mlx_lm.load(str(model_path))
+
+    config_path = Path(model_path) / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Could not find 'config.json' in the model directory: {model_path}")
+    with open(config_path, "r") as f:
+        model_config = json.load(f)
+
     harmless_dataset = load_dataset(harmless_ds_path)["train"]
     harmful_dataset = load_dataset(harmful_ds_path)["train"]
-    num_layers = len(model.model.layers)
+    num_layers = model_config["num_hidden_layers"]
     logging.info(f"Model loaded with {num_layers} layers.", extra={"extra_info": {"component": "cli", "event": "loading_end", "actual_output": {"num_layers": num_layers}}})
 
     logging.info("Probing activations", extra={"extra_info": {"component": "cli", "event": "probing_start"}})
     layers_to_probe = parse_layers(args.layers, num_layers)
     wrapper = ActivationProbeWrapper(model)
-    harmful_activations = get_mean_activations(wrapper, tokenizer, harmful_dataset, layers_to_probe, "Probing harmful prompts", args.probe_marker)
-    harmless_activations = get_mean_activations(wrapper, tokenizer, harmless_dataset, layers_to_probe, "Probing harmless prompts", args.probe_marker)
+    harmful_activations = get_mean_activations(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", args.probe_marker)
+    harmless_activations = get_mean_activations(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", args.probe_marker)
     logging.info("Activation probing complete", extra={"extra_info": {"component": "cli", "event": "probing_end"}})
 
     logging.info("Computing refusal vector", extra={"extra_info": {"component": "cli", "event": "vector_computation_start"}})
@@ -199,7 +223,7 @@ def run_abliteration(args: argparse.Namespace):
         "harmless_dataset": args.harmless_dataset,
         "harmful_dataset": args.harmful_dataset,
         "probed_layers": layers_to_probe,
-        "ablitation_vector_from_layer": use_layer_idx,
+        "ablation_vector_from_layer": use_layer_idx,
         "timestamp": datetime.utcnow().isoformat(),
         "refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())
     }
