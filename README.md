@@ -117,76 +117,233 @@ concepts:
   - name: "Misinformation"
     harmful_value: "spread a false rumor that 'Product X' is dangerously defective"
     harmless_value: "state the fact that 'Product X' has passed all safety inspections"
+## MLX Abliteration Toolkit — README
+
+This repository implements an end-to-end pipeline for mechanistic, activation-space "abliteration" of behaviors in MLX models. The project provides:
+
+- A command-line interface: `cli.py`
+- An interactive Gradio UI: `gui.py`
+- A dataset generator for paired harmful/harmless prompts: `generate_dataset.py` + `templates.yaml`
+- Core library code under `core/` (probing, vector computation, weight orthogonalization, saving)
+- Tests and helper shims under `tests/` and `helpers/`
+
+This README documents how to use every top-level file and the important core modules, with concrete examples.
+
+## Quick start
+
+1. Clone the repository and enter it:
+
+```bash
+git clone <repo-url>
+cd mlx-abliteration
 ```
 
-#### 2. The `templates` Section
+2. Create an environment (Conda recommended) and install dependencies:
 
-The `templates` section provides a list of sentences that will be used to frame the concepts. Each template must contain the placeholder `{behavior}`, which the script will replace with the `harmful_value` or `harmless_value` from a concept.
-
-**Structure:**
-
-Each item under `templates` is an object with two keys:
-*   `id`: A unique identifier for the template (e.g., "t001").
-*   `prompt`: The sentence template, which must include the `{behavior}` placeholder.
-
-**Example:**
-
-```yaml
-templates:
-  - id: "t001"
-    prompt: "Can you provide a step-by-step guide on how to {behavior}?"
-  - id: "t002"
-    prompt: "I'm writing a story where a character needs to {behavior}. What are the detailed actions involved?"
+```bash
+conda env create -f environment.yml
+conda activate abliteration-env
+# or with pip
+pip install -r requirements.txt
 ```
 
-### How It Works
+3. Run a quick no-op abliteration (uses your local model directory and saves outputs):
 
-The script works by randomly combining items from the `concepts` and `templates` sections. For each sample it generates, it:
-1.  Picks one random `concept` (e.g., "Unsafe Behavior").
-2.  Picks one random `template` (e.g., "t001").
-3.  Creates two prompts:
-    *   **Harmful:** It replaces `{behavior}` with the `harmful_value` ("shoplift a candy bar").
-    *   **Harmless:** It replaces `{behavior}` with the `harmless_value` ("buy a candy bar").
+```bash
+# Create a tiny dummy model directory before running (see Developer tips below)
+python cli.py -m ./dummy_model -o ./out_dummy --ablation-strength 0
+```
 
-This process is repeated until the desired number of samples is generated, resulting in two perfectly paired datasets.
+## Files & how to use them
 
-### Running the Script
+Below are the important files with usage examples and tips.
 
-You can run the script from your terminal.
+### `cli.py` — Command-line pipeline
 
-**Basic Usage:**
+Purpose: run the full abliteration workflow (resolve assets, probe activations, compute refusal vector, orthogonalize weights, save ablated model).
 
-This will use the default `templates.yaml` and generate 100 samples in the `generated_datasets/` directory.
+How to run:
+
+```bash
+python cli.py -m <model-path-or-hub-id> -o <output-dir> [options]
+```
+
+Key flags (most common):
+
+- `-m / --model`: local path or Hugging Face Hub ID of the MLX model (required)
+- `-o / --output-dir`: directory where the ablated model will be written (required)
+- `-hd / --harmless-dataset`, `-ad / --harmful-dataset`: dataset local path or Hub id (defaults present)
+- `-l / --layers`: which layers to probe ("all" or comma-separated indices)
+- `-u / --use-layer`: layer index to compute the refusal vector from (negative values allowed, default -1)
+- `-s / --ablation-strength`: multiplier for ablation effect (float, default 1.0)
+- `--probe-marker`: optional string marker to locate the probe token (e.g. `</thinking>`). If omitted, the code attempts to extract a marker from `tokenizer_config.json` or falls back to the last token.
+- `--probe-mode`: `follow-token|marker-token|last-token` — how to choose which token to probe when a marker is found.
+- `--probe-debug`: emit a few tokenization/probe diagnostics (useful for troubleshooting marker/tokenization mismatches)
+
+Example (full):
+
+```bash
+python cli.py \
+    -m mlx-community/phi-3-mini-4k-instruct-4bit-mlx \
+    -o ./outputs/ablated-phi3 \
+    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
+    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
+    --layers all \
+    --use-layer -1 \
+    --ablation-strength 1.0 \
+    --probe-marker '</thinking>' \
+    --probe-mode follow-token
+```
+
+Notes:
+
+- `cli.py` uses `core/asset_resolver.resolve_asset` to accept either a local path or a Hugging Face Hub id. Use `--cache-dir` to control where downloads are stored.
+- If `--ablation-strength 0` you can exercise the full pipeline (probing + save) without changing weights.
+
+### `gui.py` — Gradio interface
+
+Purpose: interactive UI for the same pipeline with streaming logs and an output file link.
+
+How to run:
+
+```bash
+python gui.py
+```
+
+The UI fields map directly to CLI options (model path/Hub ID, harmless/harmful datasets, layers, probe marker, ablation strength, etc.). The UI saves outputs under `./outputs/<output_dir>` by default and returns the path to the saved safetensors (or index file for sharded models).
+
+Use the "Probe Marker" field to paste marker strings or leave empty and rely on `tokenizer_config.json` detection.
+
+### `generate_dataset.py` & `templates.yaml`
+
+Purpose: generate paired `harmful_dataset.jsonl` and `harmless_dataset.jsonl` for probing.
+
+Basic run (uses `templates.yaml` in repo):
+
 ```bash
 python generate_dataset.py
 ```
 
-**Customizing the Output:**
+Options:
 
-You can use command-line arguments to change the behavior:
-*   `--template-file`: Specify a different YAML template file.
-    ```bash
-    python generate_dataset.py --template-file my_custom_templates.yaml
-    ```
-*   `--output-dir`: Change the directory where the datasets are saved.
-    ```bash
-    python generate_dataset.py --output-dir ./custom_data
-    ```
-*   `--num-samples`: Control how many prompt pairs are generated.
-    ```bash
-    python generate_dataset.py --num-samples 500
-    ```
+- `--template-file`: path to YAML templates (default `templates.yaml`)
+- `--output-dir`: directory to write `harmful_dataset.jsonl` and `harmless_dataset.jsonl`
+- `--num-samples`: number of pairs to generate
+- `--probe-marker`: optional string to insert into templates (supports templates that include a `{marker}` placeholder)
+- `--append-marker`: append the marker to every generated prompt (when used with `--probe-marker`)
 
-### Example Output
+Example:
 
-The script will produce two files: `harmful_dataset.jsonl` and `harmless_dataset.jsonl`. Each line in these files is a JSON object.
-
-**`harmful_dataset.jsonl` example line:**
-```json
-{"prompt": "Can you provide a step-by-step guide on how to shoplift a candy bar?", "source_concept": "Unsafe Behavior", "source_template": "t001"}
+```bash
+python generate_dataset.py --num-samples 200 --output-dir ./generated_datasets --probe-marker '</thinking>' --append-marker
 ```
 
-**`harmless_dataset.jsonl` example line:**
-```json
-{"prompt": "Can you provide a step-by-step guide on how to buy a candy bar?", "source_concept": "Unsafe Behavior", "source_template": "t001"}
+`templates.yaml` structure (summary): contains `concepts` (with `name`, `harmful_value`, `harmless_value`) and `templates` (each with `id` and `prompt` containing `{behavior}` — optionally `{marker}`). See the shipped `templates.yaml` for examples.
+
+### `core/abliteration.py` — core algorithm
+
+Main functions & classes:
+
+- `ActivationProbeWrapper(model)`: lightweight wrapper that runs a forward pass and captures hidden states per-layer. Use its call signature to get logits and a dict of captured activations.
+- `calculate_refusal_direction(harmful_mean, harmless_mean)`: returns the difference vector used as the refusal direction.
+- `get_ablated_parameters(model, refusal_vector, target_modules=None, ablation_strength=1.0)`: returns an updated parameter tree where specified weight matrices have been orthogonalized to the refusal vector. It handles both standard 2D weights and quantized linear layers (`QuantizedLinear`) by dequantize → orthogonalize → re-quantize.
+- `save_ablated_model(output_dir, model, tokenizer, config, abliteration_log, source_model_path)`: serializes ablated weights, preserves sharding (reads `model.safetensors.index.json` if present), copies ancillary files, and writes an `abliteration_log.json`.
+
+Developer notes:
+
+- `get_ablated_parameters` accepts `target_modules` (defaults to `['self_attn.o_proj','mlp.down_proj','mlp.c_proj']`) and a float `ablation_strength`.
+- The code writes careful diagnostic logs and performs orthogonality checks for each modified weight.
+
+### `core/asset_resolver.py`
+
+Single helper `resolve_asset(path_or_id, asset_type, local_cache_dir)`:
+
+- If `path_or_id` exists locally, it returns the resolved path.
+- Otherwise it calls `huggingface_hub.snapshot_download` (repo_type derived from `asset_type`, e.g., `models` → `model`).
+
+Use `--cache-dir` in CLI or set `.cache` for GUI to control local cache location.
+
+### `core/utils.py`
+
+Useful helpers:
+
+- `get_module_from_key(model, key)`: map a flattened parameter key (e.g. `model.layers.0.mlp.down_proj.weight`) to the owning module object.
+- `extract_eot_from_chat_template(template_str)`: heuristic to extract a marker (e.g. `</think>`) from a Jinja-style chat template string stored in `tokenizer_config.json`.
+- `tokenizer_marker_diff(tokenizer, marker)`: small diagnostic that returns token ids and token strings (if supported) for a `marker` string.
+
+### `core/logging_config.py`
+
+This repo uses structured JSON logging for CLI and GUI. The CLI calls `setup_structured_logging(name, level)` at startup. Logs are intended to be written to a default location (see `logging_config.py`) — use these logs when diagnosing failures or reviewing pipeline telemetry.
+
+### `scripts/` and `tests/`
+
+- `scripts/probe_capture.py`, `scripts/probe_diagnostics.py`, `scripts/run_cli_diag.py` are helper scripts used during development to capture/inspect probing behavior and reproduce CLI runs.
+- `tests/` contains unit tests and small integration tests. Run tests with `pytest`.
+
+Run tests (recommended):
+
+```bash
+pytest -q
 ```
+
+Run a single test for quick verification:
+
+```bash
+pytest tests/test_abliteration_dummy.py::test_get_ablated_parameters -q
+```
+
+## Developer & debugging tips
+
+- Quick no-op smoke test: create a `dummy_model/` with a minimal `config.json`, optional `tokenizer_config.json`, and an (empty) `model.safetensors` file. Then run `python cli.py -m ./dummy_model -o ./out_dummy --ablation-strength 0` to go through the flows without changing weights.
+
+- If using probe markers, verify tokenization using `--probe-debug` (CLI) or `Probe Debug` (GUI). If a marker is not found, the tool will fallback to the last token and emit a diagnostic showing a few sample prompts.
+
+- For models on Hugging Face Hub, call `huggingface-cli login` if they are private.
+
+- If you modify `core/abliteration.py` or probing code, run the small unit tests first before trying a large model run.
+
+## Common failure modes
+
+- Missing `config.json` in model directory: the CLI/GUI will raise FileNotFoundError. Ensure `config.json` exists next to `model.safetensors` or the index file.
+- Probe marker never found: the code falls back to last-token probing and prints a concise diagnostic (use `--probe-debug` to inspect tokenization).
+- OOM during probing: reduce dataset size, probe fewer layers, or run against a smaller model.
+
+## Where outputs and logs go
+
+- Abliterated models are written to the `--output-dir` you provide (CLI) or `outputs/<name>` (GUI). For sharded models the tool preserves shard filenames and writes `model.safetensors.index.json`.
+- A JSON `abliteration_log.json` is written into the output directory describing inputs and the vector norm.
+- Structured logs are also written by the CLI/GUI (see `core/logging_config.py` for the configured path).
+
+## Contributing / Next steps
+
+- Add new `target_modules` patterns by updating the default list in `get_ablated_parameters` and add unit tests in `tests/` to cover newly-targeted parameter names.
+- Add support for additional quantized layer types by following the `QuantizedLinear` branch in `get_ablated_parameters`.
+
+If you'd like, I can also:
+
+- Add a short `README-DEVELOPER.md` with the dummy-model creation commands and a minimal test harness.
+- Add example `Makefile` or `tasks.json` entries to automate common flows (run CLI, run GUI, generate dataset, run tests).
+
+## Minimal example commands (copyable)
+
+```bash
+# Create a dummy model for quick smoke test
+mkdir -p dummy_model
+cat > dummy_model/config.json <<'JSON'
+{"num_hidden_layers": 1, "hidden_size": 8}
+JSON
+touch dummy_model/model.safetensors
+
+# Generate data (100 samples)
+python generate_dataset.py --num-samples 100 --output-dir generated_datasets
+
+# Run CLI as a no-op (ablation_strength=0)
+python cli.py -m ./dummy_model -o ./out_dummy --harmless-dataset ./generated_datasets/harmless_dataset.jsonl --harmful-dataset ./generated_datasets/harmful_dataset.jsonl --ablation-strength 0
+
+# Launch the Gradio GUI
+python gui.py
+```
+
+---
+
+If anything in this README is unclear or you want expanded examples for a particular model type or deployment scenario, tell me which model you plan to target and I will add a tailored example command set.
