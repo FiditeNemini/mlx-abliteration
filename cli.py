@@ -145,7 +145,7 @@ def get_mean_activations(
         if not prompt:
             tqdm.write("Skipping empty prompt.")
             continue
-        
+
         tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
         if len(tokens) > max_seq_len:
             tokens = tokens[:max_seq_len]
@@ -224,8 +224,8 @@ def get_mean_activations(
                 diag_lines.append(f"  [{i+1}] prompt: {truncated}")
                 diag_lines.append(f"       tokens (len={len(s_tokens)}): {s_tokens[:40]}{'...' if len(s_tokens)>40 else ''}")
 
-        for l in diag_lines:
-            tqdm.write(l)
+        for line in diag_lines:
+            tqdm.write(line)
         # Also log structured diagnostic
         logging.warning("Probe marker not found diagnostic", extra={"extra_info": {"component": "cli", "event": "probe_marker_not_found_diag", "marker": probe_marker, "marker_tokens": marker_list, "sample_count": len(sample_not_found_examples)}})
 
@@ -339,8 +339,17 @@ def run_abliteration(args: argparse.Namespace):
     use_layer_idx = args.use_layer if args.use_layer >= 0 else num_layers + args.use_layer
     if use_layer_idx not in layers_to_probe:
         raise ValueError(f"Layer {use_layer_idx} was not in the list of probed layers.")
-    
-    logging.info(f"Using activations from layer {use_layer_idx} for refusal direction.", extra={"extra_info": {"component": "cli", "event": "vector_computation_info", "inputs": {"use_layer": use_layer_idx}}})
+
+    logging.info(
+        f"Using activations from layer {use_layer_idx} for refusal direction.",
+        extra={
+            "extra_info": {
+                "component": "cli",
+                "event": "vector_computation_info",
+                "inputs": {"use_layer": use_layer_idx},
+            }
+        },
+    )
     refusal_vector = calculate_refusal_direction(
         harmful_activations[use_layer_idx],
         harmless_activations[use_layer_idx]

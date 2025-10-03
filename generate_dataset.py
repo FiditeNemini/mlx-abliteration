@@ -32,6 +32,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Number of samples to generate. Defaults to 'num_samples' in the YAML."
     )
+    parser.add_argument(
+        "--probe-marker",
+        type=str,
+        default=None,
+        help="Optional probe marker to insert into templates (e.g., '</think>'). If templates include '{marker}' it will be formatted in; use --append-marker to append marker to prompts."
+    )
+    parser.add_argument(
+        "--append-marker",
+        action="store_true",
+        help="If set and --probe-marker is provided, the marker will be appended to each generated prompt (in addition to any template formatting)."
+    )
     return parser.parse_args()
 
 def generate_datasets(args: argparse.Namespace):
@@ -78,13 +89,28 @@ def generate_datasets(args: argparse.Namespace):
             template_obj = random.choice(templates)
             template_prompt = template_obj['prompt']
 
+            # Allow templates to include an optional {marker} placeholder
+            if args.probe_marker:
+                # If the template uses {marker}, format it in; otherwise we'll append later if requested
+                try:
+                    template_prompt = template_prompt.format(marker=args.probe_marker, behavior="{behavior}")
+                except Exception:
+                    # Template didn't use {marker}; leave prompt as-is and we may append below
+                    template_prompt = template_obj['prompt']
+
             # Generate harmful prompt
             harmful_prompt = template_prompt.format(behavior=concept['harmful_value'])
+            if args.probe_marker and args.append_marker:
+                harmful_prompt = harmful_prompt + (" " if not harmful_prompt.endswith(" ") else "") + args.probe_marker
+
             harmful_record = {"prompt": harmful_prompt, "source_concept": concept['name'], "source_template": template_obj['id']}
             f_harmful.write(json.dumps(harmful_record) + '\n')
 
             # Generate harmless prompt
             harmless_prompt = template_prompt.format(behavior=concept['harmless_value'])
+            if args.probe_marker and args.append_marker:
+                harmless_prompt = harmless_prompt + (" " if not harmless_prompt.endswith(" ") else "") + args.probe_marker
+
             harmless_record = {"prompt": harmless_prompt, "source_concept": concept['name'], "source_template": template_obj['id']}
             f_harmless.write(json.dumps(harmless_record) + '\n')
 

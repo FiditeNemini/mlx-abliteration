@@ -308,10 +308,10 @@ def run_abliteration_stream(
         # If probe_debug was requested, print the collected per-example probe indices
         if probe_debug:
             debug_lines = []
-            debug_lines.extend([f"HARMFUL: {l}" for l in harmful_debug])
-            debug_lines.extend([f"HARMLESS: {l}" for l in harmless_debug])
-            for dl in debug_lines:
-                yield log_and_yield(dl, {"event": "probe_debug_line"}), None
+            debug_lines.extend([f"HARMFUL: {line}" for line in harmful_debug])
+            debug_lines.extend([f"HARMLESS: {line}" for line in harmless_debug])
+            for debug_line in debug_lines:
+                yield log_and_yield(debug_line, {"event": "probe_debug_line"}), None
 
         yield log_and_yield("Activation probing complete.", {"event": "probing_end"}), None
 
