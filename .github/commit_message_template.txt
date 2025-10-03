@@ -1,0 +1,7 @@
+Short summary (50 chars or less)
+
+More detailed description of the change, if necessary.
+
+Issue: #<number> (optional)
+
+Co-authored-by: <name> <email> (optional)
