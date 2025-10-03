@@ -97,7 +97,7 @@ def get_mean_activations_from_dataset(
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
 
         probe_idx = -1  # Default to the last token
-        if marker_tokens is not None:
+        if marker_tokens is not None and marker_tokens.size > 0:
             token_list = tokens.tolist()
             marker_list = marker_tokens.tolist()
             found = False
