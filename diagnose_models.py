@@ -2,7 +2,6 @@ import argparse
 import json
 from pathlib import Path
 import filecmp
-import mlx.core as mx
 from safetensors import safe_open
 
 # ANSI escape codes for colored output
@@ -100,7 +99,7 @@ def inspect_safetensors(source_path: Path, new_path: Path):
                         continue
                     else:
                         raise e
-        
+
         new_tensors = {}
         with safe_open(new_path, framework="mlx") as f:
             new_metadata = f.metadata()

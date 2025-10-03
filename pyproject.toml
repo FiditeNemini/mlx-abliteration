@@ -1,0 +1,5 @@
+[tool.ruff]
+line-length = 88
+extend-exclude = ["core/vendor", "tests", "scripts"]
+select = ["E", "F", "W", "C90"]
+extend-ignore = ["E501", "C901"]
