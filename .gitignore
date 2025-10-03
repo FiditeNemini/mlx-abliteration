@@ -9,3 +9,29 @@ __pycache__/
 .env.*
 /generated_datasets/*
 /outputs/*
+
+# Python virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# pytest / test caches
+.pytest_cache/
+.cache/pip
+
+# Editor/project files
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Static caches and build artifacts
+.mypy_cache/
+pip-wheel-metadata/
+.eggs/
+build/
+dist/
+
+# Coverage
+.coverage
+coverage.xml
