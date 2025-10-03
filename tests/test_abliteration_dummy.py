@@ -1,96 +1,11 @@
-import json
 from pathlib import Path
 import numpy as np
+import json
 
-import types
+from tests.helpers.shims import install_shims
 
-# Create a tiny local shim for `mlx` to avoid native binary deps during tests.
-class _MxCoreShim(types.ModuleType):
-    def __init__(self, name):
-        super().__init__(name)
-
-    @staticmethod
-    def array(x):
-        return np.array(x)
-
-    @staticmethod
-    def zeros(n):
-        return np.zeros(n)
-
-    @staticmethod
-    def eval(_):
-        return None
-
-    class linalg:
-        @staticmethod
-        def norm(v):
-            try:
-                return float(np.linalg.norm(np.array(v)))
-            except Exception:
-                return 0.0
-
-
-# Register 'mlx' and 'mlx.core' modules in sys.modules so imports succeed
-import sys
-mlx_mod = types.ModuleType('mlx')
-mlx_core_mod = _MxCoreShim('mlx.core')
-sys.modules['mlx'] = mlx_mod
-sys.modules['mlx.core'] = mlx_core_mod
-# minimal nn shim
-def _save_safetensors(path, tensors, metadata=None):
-    out = {}
-    for k, v in tensors.items():
-        try:
-            arr = np.array(v)
-            out[k] = arr.tolist()
-        except Exception:
-            out[k] = v
-    with open(path, 'w') as f:
-        json.dump({"tensors": out, "metadata": metadata}, f)
-
-mlx_core_mod.save_safetensors = _save_safetensors
-nn_mod = types.ModuleType('mlx.nn')
-
-class _ModuleShim:
-    def __init__(self):
-        pass
-
-class _QuantizedLinearShim:
-    def __init__(self):
-        # attributes used in core code: group_size, bits
-        self.group_size = 1
-        self.bits = 8
-
-nn_mod.Module = _ModuleShim
-nn_mod.layers = types.ModuleType('mlx.nn.layers')
-nn_mod.layers.quantized = types.ModuleType('mlx.nn.layers.quantized')
-nn_mod.layers.quantized.QuantizedLinear = _QuantizedLinearShim
-
-sys.modules['mlx.nn'] = nn_mod
-sys.modules['mlx.nn.layers'] = nn_mod.layers
-sys.modules['mlx.nn.layers.quantized'] = nn_mod.layers.quantized
-
-# mlx.utils shim with tree_unflatten
-mlx_utils_mod = types.ModuleType('mlx.utils')
-def tree_unflatten(pairs):
-    # Expect pairs as list of (key, value)
-    return dict(pairs)
-mlx_utils_mod.tree_unflatten = tree_unflatten
-sys.modules['mlx.utils'] = mlx_utils_mod
-
-# mlx_lm.utils shim with tree_flatten
-mlx_lm_mod = types.ModuleType('mlx_lm')
-mlx_lm_utils = types.ModuleType('mlx_lm.utils')
-def tree_flatten(x):
-    # If x is already list of pairs, return as-is; otherwise try to dict->items
-    try:
-        return list(x)
-    except Exception:
-        return []
-mlx_lm_utils.tree_flatten = tree_flatten
-mlx_lm_mod.utils = mlx_lm_utils
-sys.modules['mlx_lm'] = mlx_lm_mod
-sys.modules['mlx_lm.utils'] = mlx_lm_utils
+# install lightweight mlx shims for tests
+install_shims()
 
 from core.abliteration import get_ablated_parameters, save_ablated_model
 
