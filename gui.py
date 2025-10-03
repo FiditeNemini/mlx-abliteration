@@ -295,7 +295,7 @@ def create_ui() -> gr.Blocks:
                         layers_input = gr.Textbox(label="Layers to Probe", value="all", info="A comma-separated list of layer indices or 'all'.")
                         use_layer_slider = gr.Slider(minimum=-36, maximum=35, step=1, value=-1, label="Use Refusal Vector from Layer", info="The layer index for the refusal vector. Negative values count from the end.")
                         strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Ablation Strength", info="The strength of the ablation effect. >1.0 amplifies the effect.")
-                        probe_marker_input = gr.Code(label="Probe Marker", language="text")
+                        probe_marker_input = gr.Code(label="Probe Marker", language="plaintext")
                 start_button = gr.Button("Start Abliteration", variant="primary", scale=1)
             with gr.Column(scale=3):
                 log_output = gr.Textbox(label="Process Log", lines=20, interactive=False, autoscroll=True)
