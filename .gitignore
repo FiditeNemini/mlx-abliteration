@@ -3,3 +3,9 @@ core/__pycache__/
 .DS_Store
 .cache/*
 *.code-workspace
+__pycache__/
+.vscode/
+.env
+.env.*
+/generated_datasets/*
+/outputs/*
