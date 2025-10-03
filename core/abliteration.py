@@ -161,7 +161,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
     of specified modules to be orthogonal to the refusal vector, effectively
     "ablating" the corresponding behavior.
 
-    Args:
+            w_ablated_float = w_float - ablation_strength * proj_W_on_v
         model (nn.Module): The model to modify.
         refusal_vector (mx.array): The refusal direction vector.
         target_modules (Optional[List[str]]): A list of module names to target for
