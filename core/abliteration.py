@@ -90,8 +90,36 @@ class ActivationProbeWrapper(nn.Module):
         captured_activations = {}
         h = self.embedding(inputs)
 
+        # Some model layer implementations expect a cache-like object (either
+        # indexable or providing methods like `update_and_fetch` and an
+        # `offset` attribute). Passing None sometimes triggers UnboundLocalError
+        # inside those implementations, and passing a plain dict can raise
+        # KeyError when numeric indices are accessed. Create a lightweight
+        # DummyCache that is safe for all layers and share it across the
+        # forward pass.
+        class DummyCache:
+            def __init__(self):
+                # offset is used by rotary/rope implementations
+                self.offset = 0
+                # provide slot-keys used by gated-delta implementations
+                self._store = {0: None, 1: None}
+
+            def __getitem__(self, idx):
+                return self._store.get(idx, None)
+
+            def __setitem__(self, idx, val):
+                self._store[idx] = val
+
+            def update_and_fetch(self, keys, values):
+                # Some attention implementations expect the cache to return
+                # possibly updated (keys, values). For probing we don't need
+                # to modify them, so return as-is.
+                return keys, values
+
+        cache = DummyCache()
+
         for i, layer in enumerate(self.model_layers):
-            output = layer(h, mask=mask, cache=None)
+            output = layer(h, mask=mask, cache=cache)
             h = output[0] if isinstance(output, tuple) else output
             if layers_to_probe is not None and i in layers_to_probe:
                 captured_activations[i] = h

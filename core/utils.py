@@ -64,3 +64,30 @@ def extract_eot_from_chat_template(template_str: str) -> str | None:
         if marker:
             return marker
     return None
+
+
+def tokenizer_marker_diff(tokenizer: object, marker: str) -> dict:
+    """Return a small diagnostic dict describing how `tokenizer` encodes `marker`.
+
+    The returned dict has keys:
+      - marker: the literal marker string
+      - ids: list of token ids produced by tokenizer.encode(marker, add_special_tokens=False)
+      - tokens: list of token strings if the tokenizer exposes `convert_ids_to_tokens`, otherwise None
+
+    This helper is intentionally minimal and safe to call in debug paths.
+    """
+    result = {"marker": marker, "ids": None, "tokens": None}
+    if marker is None:
+        return result
+    try:
+        ids = tokenizer.encode(marker, add_special_tokens=False)
+        result["ids"] = list(ids) if hasattr(ids, '__iter__') else [ids]
+    except Exception:
+        result["ids"] = None
+    try:
+        if hasattr(tokenizer, "convert_ids_to_tokens") and result["ids"] is not None:
+            toks = tokenizer.convert_ids_to_tokens(result["ids"])
+            result["tokens"] = list(toks)
+    except Exception:
+        result["tokens"] = None
+    return result

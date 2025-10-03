@@ -55,10 +55,15 @@ def get_mean_activations_from_dataset(
     desc: str,
     progress: gr.Progress,
     probe_marker: Optional[str] = None,
-) -> Dict[int, mx.array]:
+    probe_mode: str = "follow-token",
+    probe_debug: bool = False,
+    probe_debug_n: int = 3,
+    probe_debug_full: bool = False,
+) -> Tuple[Dict[int, mx.array], list]:
     """Computes mean activations for a given dataset.
 
-    If a `probe_marker` is provided, it finds the marker in the tokenized
+    probe_marker: Optional[str] = None,
+    probe_mode: str = "follow-token",
     prompt and uses the activation of the token immediately preceding it.
     Otherwise, it defaults to using the activation of the last token.
 
@@ -86,6 +91,11 @@ def get_mean_activations_from_dataset(
     else:
         marker_tokens = None
 
+    # Track whether the marker was ever found to avoid noisy per-item warnings
+    marker_found_any = False
+    sample_not_found_examples = []
+    probe_debug_lines: list[str] = []
+
     for item in progress.tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
         if not prompt:
@@ -97,7 +107,7 @@ def get_mean_activations_from_dataset(
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
 
         probe_idx = -1  # Default to the last token
-        if marker_tokens is not None and marker_tokens.size > 0:
+        if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0:
             token_list = tokens.tolist()
             marker_list = marker_tokens.tolist()
             found = False
@@ -108,23 +118,55 @@ def get_mean_activations_from_dataset(
                     potential_idx = i + len(marker_list)
                     # Ensure the index is within the sequence bounds
                     if potential_idx < len(token_list):
+                        # Marker is followed by another token; capture that following token
                         probe_idx = potential_idx
                         found = True
                     else:
-                        # Marker is at the very end, fallback to last token
-                        probe_idx = -1
+                        # Marker found at end of prompt; capture marker token activation instead
+                        probe_idx = i + len(marker_list) - 1
+                        found = True
                     break  # Found the last marker, stop searching
 
-            if not found:
-                gr.Warning(f"Probe marker '{probe_marker}' not found in an item. Using last token.")
+            if found:
+                marker_found_any = True
+                if probe_debug and len(probe_debug_lines) < probe_debug_n:
+                    truncated = (prompt[:200] + '...') if len(prompt) > 200 else prompt
+                    probe_debug_lines.append(f"probe_idx={probe_idx}, prompt={truncated}")
+            else:
+                if len(sample_not_found_examples) < 3:
+                    try:
+                        sample_not_found_examples.append((prompt, token_list))
+                    except Exception:
+                        pass
 
         for layer_idx, act in captured.items():
-            probe_act = act[0, probe_idx, :]
+            # ensure probe_idx is within bounds
+            use_idx = probe_idx if (0 <= probe_idx < act.shape[1]) else act.shape[1] - 1
+            probe_act = act[0, use_idx, :]
             counts[layer_idx] += 1
             delta = probe_act - mean_activations[layer_idx]
             mean_activations[layer_idx] += delta / counts[layer_idx]
         mx.eval(list(mean_activations.values()))
-    return mean_activations
+    if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0 and not marker_found_any:
+        try:
+            marker_list = marker_tokens.tolist()
+        except Exception:
+            marker_list = None
+
+        message_lines = [f"Probe marker {repr(probe_marker)} not found in any items. Using last token for all examples."]
+        message_lines.append(f"Marker token ids: {marker_list}")
+        if sample_not_found_examples:
+            message_lines.append("Sample prompts (truncated) and token ids where marker was not found:")
+            for i, (s_prompt, s_tokens) in enumerate(sample_not_found_examples):
+                truncated = (s_prompt[:200] + '...') if len(s_prompt) > 200 else s_prompt
+                message_lines.append(f"  [{i+1}] prompt: {truncated}")
+                message_lines.append(f"       tokens (len={len(s_tokens)}): {s_tokens[:40]}{'...' if len(s_tokens)>40 else ''}")
+
+        # Show a single UI-visible warning
+        gr.Warning("\n".join(message_lines))
+        logging.warning("Probe marker not found diagnostic", extra={"extra_info": {"component": "gui", "event": "probe_marker_not_found_diag", "marker": probe_marker, "marker_tokens": marker_list, "sample_count": len(sample_not_found_examples)}})
+
+    return mean_activations, probe_debug_lines
 
 def run_abliteration_stream(
     model_id: str,
@@ -135,6 +177,10 @@ def run_abliteration_stream(
     use_layer_idx: int,
     ablation_strength: float,
     probe_marker: str,
+    probe_mode: str = "follow-token",
+    probe_debug: bool = False,
+    probe_debug_n: int = 3,
+    probe_debug_full: bool = False,
     progress=gr.Progress(),
 ) -> Generator[Tuple[str, None] | Tuple[str, str], None, None]:
     """
@@ -153,6 +199,7 @@ def run_abliteration_stream(
         progress (gr.Progress): A Gradio Progress object to update the UI.
 
     Yields:
+        probe_mode: str = "follow-token",
         A tuple containing the updated log history and an optional output file path.
 
     Raises:
@@ -229,8 +276,42 @@ def run_abliteration_stream(
         layers_to_probe = list(range(num_layers)) if layers_str.lower() == 'all' else [int(x.strip()) for x in layers_str.split(",")]
         wrapper = ActivationProbeWrapper(model)
 
-        harmful_mean_activations = get_mean_activations_from_dataset(harmful_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmful prompts", progress, final_probe_marker)
-        harmless_mean_activations = get_mean_activations_from_dataset(harmless_dataset, wrapper, tokenizer, layers_to_probe, model_config, "Probing harmless prompts", progress, final_probe_marker)
+        harmful_mean_activations, harmful_debug = get_mean_activations_from_dataset(
+            harmful_dataset,
+            wrapper,
+            tokenizer,
+            layers_to_probe,
+            model_config,
+            "Probing harmful prompts",
+            progress,
+            final_probe_marker,
+            probe_mode=probe_mode,
+            probe_debug=probe_debug,
+            probe_debug_n=probe_debug_n,
+            probe_debug_full=probe_debug_full,
+        )
+        harmless_mean_activations, harmless_debug = get_mean_activations_from_dataset(
+            harmless_dataset,
+            wrapper,
+            tokenizer,
+            layers_to_probe,
+            model_config,
+            "Probing harmless prompts",
+            progress,
+            final_probe_marker,
+            probe_mode=probe_mode,
+            probe_debug=probe_debug,
+            probe_debug_n=probe_debug_n,
+            probe_debug_full=probe_debug_full,
+        )
+
+        # If probe_debug was requested, print the collected per-example probe indices
+        if probe_debug:
+            debug_lines = []
+            debug_lines.extend([f"HARMFUL: {l}" for l in harmful_debug])
+            debug_lines.extend([f"HARMLESS: {l}" for l in harmless_debug])
+            for dl in debug_lines:
+                yield log_and_yield(dl, {"event": "probe_debug_line"}), None
 
         yield log_and_yield("Activation probing complete.", {"event": "probing_end"}), None
 
@@ -296,11 +377,15 @@ def create_ui() -> gr.Blocks:
                         use_layer_slider = gr.Slider(minimum=-36, maximum=35, step=1, value=-1, label="Use Refusal Vector from Layer", info="The layer index for the refusal vector. Negative values count from the end.")
                         strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Ablation Strength", info="The strength of the ablation effect. >1.0 amplifies the effect.")
                         probe_marker_input = gr.Code(label="Probe Marker", language=None, lines=1)
+                        probe_mode_input = gr.Dropdown(label="Probe Mode", choices=["follow-token", "marker-token", "last-token"], value="follow-token", info="How to select the probe token when a marker is found.")
+                        probe_debug_checkbox = gr.Checkbox(label="Probe Debug", value=False, info="Emit per-example probe index debug lines into the log.")
+                        probe_debug_n_input = gr.Number(label="Probe Debug N", value=3, precision=0)
+                        probe_debug_full_checkbox = gr.Checkbox(label="Probe Debug Full Tokens", value=False, info="When debug enabled, show token strings if available.")
                 start_button = gr.Button("Start Abliteration", variant="primary", scale=1)
             with gr.Column(scale=3):
                 log_output = gr.Textbox(label="Process Log", lines=20, interactive=False, autoscroll=True)
                 output_file_display = gr.File(label="Abliterated Model Path", interactive=False)
-        inputs = [model_input, harmless_ds_input, harmful_ds_input, output_dir_input, layers_input, use_layer_slider, strength_slider, probe_marker_input]
+        inputs = [model_input, harmless_ds_input, harmful_ds_input, output_dir_input, layers_input, use_layer_slider, strength_slider, probe_marker_input, probe_mode_input, probe_debug_checkbox, probe_debug_n_input, probe_debug_full_checkbox]
         for inp in inputs:
             inp.change(lambda: (None, None), outputs=[log_output, output_file_display])
         start_button.click(fn=run_abliteration_stream, inputs=inputs, outputs=[log_output, output_file_display])
