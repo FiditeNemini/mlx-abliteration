@@ -180,6 +180,16 @@ Key flags (most common):
 - `--probe-mode`: `follow-token|marker-token|last-token` — how to choose which token to probe when a marker is found.
 - `--probe-mode`: `follow-token|marker-token|last-token|thinking-span` — how to choose which token(s) to probe when a marker is found. Use `thinking-span` to average a small window of tokens following a marker (see experimental features below).
 - `--ablate-method`: `projection|sequential` — how to remove the identified components from model weights. `projection` (default) builds a projection matrix from the top-k components and removes that subspace in one step; `sequential` subtracts projections component-by-component (legacy behavior). Use `projection` for multi-component ablation (recommended).
+
+#### New probe mode: `thinking-span`
+
+`thinking-span` averages activations across a short contiguous span of tokens immediately following an end-of-thought marker (for example `</think>`). Use this when a model's internal reasoning or the transition token is split across multiple tokenizer tokens. Recommended defaults:
+
+- Probe Marker: `</think>` (auto-detected when present in `tokenizer_config.json`)
+- Probe Mode: `thinking-span`
+- Probe Span: `1` (increase to 2-4 if the post-marker content tokenizes into multiple tokens you wish to average)
+
+`thinking-span` is conservative and is best used when `--probe-debug` shows marker tokens followed by multi-token transitions.
 - `--probe-debug`: emit a few tokenization/probe diagnostics (useful for troubleshooting marker/tokenization mismatches)
 
 Example (full):
@@ -281,6 +291,22 @@ This repo uses structured JSON logging for CLI and GUI. The CLI calls `setup_str
 
 - `scripts/probe_capture.py`, `scripts/probe_diagnostics.py`, `scripts/run_cli_diag.py` are helper scripts used during development to capture/inspect probing behavior and reproduce CLI runs.
 - `tests/` contains unit tests and small integration tests. Run tests with `pytest`.
+
+### `scripts/run_cli_diag.py` — safe diagnostic dry-run
+
+This small helper runs the CLI in a diagnostic (dry-run) mode and writes JSON/CSV suggestions for which layers look most discriminative. Important: pass the model path or Hub id on the command line rather than editing the script to avoid leaking sensitive local paths.
+
+Examples:
+
+```bash
+# Run against a local model directory (recommended to avoid embedding paths in the repo)
+python scripts/run_cli_diag.py -m /path/to/local/model -o ./outputs/diag_out
+
+# Run against a Hugging Face Hub id
+python scripts/run_cli_diag.py -m "org/model-id" -o ./outputs/diag_out --probe-marker "</think>"
+```
+
+The script will call `cli.run_abliteration` with `return_means=True`, compute per-layer diff norms, and write `dry_run_suggestions.json` and `dry_run_layer_stats.csv` into the output directory.
 
 Run tests (recommended):
 

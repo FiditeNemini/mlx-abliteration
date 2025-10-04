@@ -30,9 +30,10 @@ class _MxCoreShim(types.ModuleType):
         @staticmethod
         def norm(v):
             try:
-                return float(np.linalg.norm(np.array(v)))
+                # Return a numpy scalar so callers can call .item()
+                return np.array(np.linalg.norm(np.array(v)))
             except Exception:
-                return 0.0
+                return np.array(0.0)
 
 
 def install_shims():

@@ -543,6 +543,30 @@ def run_abliteration(args: argparse.Namespace):
         source_model_path=str(model_path)
     )
     logging.info("Abliterated model saved", extra={"extra_info": {"component": "cli", "event": "saving_end", "actual_output": {"output_dir": args.output_dir}}})
+    # If called programmatically, optionally return the computed mean activations
+    if getattr(args, "return_means", False):
+        try:
+            # Convert MLX arrays to plain Python lists where possible
+            def to_list(mx_arr):
+                try:
+                    return mx_arr.tolist()
+                except Exception:
+                    try:
+                        return list(mx_arr)
+                    except Exception:
+                        return None
+
+            harmful_means = {int(k): to_list(v) for k, v in harmful_activations.items()}
+            harmless_means = {int(k): to_list(v) for k, v in harmless_activations.items()}
+            return {
+                "harmful_mean_activations": harmful_means,
+                "harmless_mean_activations": harmless_means,
+                "model_config": model_config,
+                "probed_layers": layers_to_probe,
+            }
+        except Exception:
+            logging.exception("Failed to assemble return_means payload")
+            return None
 
 def main():
     """The main entry point for the CLI script."""

@@ -2,13 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev, bugfix ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, dev, bugfix ]
+    branches: [ main ]
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     env:
       TOKENIZERS_PARALLELISM: 'false'
 
