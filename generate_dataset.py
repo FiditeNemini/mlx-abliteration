@@ -126,6 +126,10 @@ def generate_datasets(args: argparse.Namespace):
                 except Exception:
                     # Template didn't use {marker}; leave prompt as-is and we may append below
                     template_prompt = template_obj['prompt']
+            else:
+                # Ensure any {marker} placeholders are removed to avoid KeyError when formatting behavior
+                if "{marker}" in template_prompt:
+                    template_prompt = template_prompt.replace("{marker}", "")
 
             # Generate the raw harmful/harmless prompts (the behavior slot filled)
             harmful_core = template_prompt.format(behavior=concept['harmful_value'])

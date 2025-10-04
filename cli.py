@@ -26,7 +26,7 @@ import logging
 import sys
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 import mlx.core as mx
@@ -61,7 +61,11 @@ def parse_args() -> argparse.Namespace:
     abl_group.add_argument("-u", "--use-layer", type=int, default=-1, help="Layer index for the refusal vector. Default: -1 (last layer).")
     abl_group.add_argument("-s", "--ablation-strength", type=float, default=1.0, help="Strength of the ablation effect.")
     abl_group.add_argument("--probe-marker", type=str, default=None, help="String marker for precise activation probing (e.g., '</thinking>').")
-    abl_group.add_argument("--probe-mode", type=str, default="follow-token", choices=["follow-token", "marker-token", "last-token"], help="How to select the probe token when a marker is found: 'follow-token' (token after marker), 'marker-token' (the marker token itself), or 'last-token' (always use last token).")
+    abl_group.add_argument("--probe-mode", type=str, default="follow-token", choices=["follow-token", "marker-token", "last-token", "thinking-span"], help="How to select the probe token when a marker is found: 'follow-token' (token after marker), 'marker-token' (the marker token itself), 'last-token' (always use last token), or 'thinking-span' (average a small span after the marker).")
+    abl_group.add_argument("--probe-span", type=int, default=1, help="Number of tokens to average after the probe marker when using 'thinking-span' probe mode. Defaults to 1 (single token).")
+    abl_group.add_argument("--ablate-k", type=int, default=1, help="Number of principal components to ablate (1 = single vector).")
+    abl_group.add_argument("--ablate-method", type=str, default="projection", choices=["projection", "sequential"], help="Method used to ablate components: 'projection' builds a projection matrix and removes the subspace in one step; 'sequential' subtracts projections component-by-component.")
+    abl_group.add_argument("--pca-sample", type=int, default=512, help="Maximum number of per-example activations to collect for PCA when --ablate-k > 1.")
     abl_group.add_argument("--probe-debug", action="store_true", help="Enable probe debug output (dump tokenized prompts for first N examples).")
     abl_group.add_argument("--probe-debug-n", type=int, default=3, help="Number of sample prompts to dump when --probe-debug is set.")
     abl_group.add_argument("--probe-debug-full", action="store_true", help="When used with --probe-debug, also show token strings (if tokenizer supports convert_ids_to_tokens).")
@@ -103,6 +107,7 @@ def get_mean_activations(
     probe_debug_n: int = 3,
     probe_debug_full: bool = False,
     probe_mode: str = "follow-token",
+    probe_span: int = 1,
 ) -> Dict[int, mx.array]:
     """Computes mean activations for a given dataset using Welford's algorithm.
 
@@ -152,6 +157,7 @@ def get_mean_activations(
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
 
         probe_idx = -1  # Default to the last token
+        probe_idx_list = None
         if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0:
             token_list = tokens.tolist()
             marker_list = marker_tokens.tolist()
@@ -169,6 +175,15 @@ def get_mean_activations(
                             probe_idx = i + len(marker_list) - 1
                     elif probe_mode == "marker-token":
                         probe_idx = i + len(marker_list) - 1
+                    elif probe_mode == "thinking-span":
+                        # Average activations across a span of tokens after the marker
+                        start = i + len(marker_list)
+                        if start < len(token_list):
+                            end = min(len(token_list), start + probe_span)
+                            probe_idx_list = list(range(start, end))
+                        else:
+                            # marker at end: fallback to marker token
+                            probe_idx = i + len(marker_list) - 1
                     elif probe_mode == "last-token":
                         probe_idx = len(token_list) - 1
                     found = True
@@ -198,9 +213,18 @@ def get_mean_activations(
                     pass
 
         for layer_idx, act in captured.items():
-            # ensure probe_idx is within bounds; fallback to last token
-            use_idx = probe_idx if (0 <= probe_idx < act.shape[1]) else act.shape[1] - 1
-            probe_act = act[0, use_idx, :]
+            # decide indices to use (single index or list).
+            if probe_idx_list is not None:
+                # filter out-of-bounds indices
+                valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < act.shape[1]]
+                if valid_idxs:
+                    probe_act = act[0, valid_idxs, :].mean(axis=0)
+                else:
+                    probe_act = act[0, -1, :]
+            else:
+                # ensure probe_idx is within bounds; fallback to last token
+                use_idx = probe_idx if (0 <= probe_idx < act.shape[1]) else act.shape[1] - 1
+                probe_act = act[0, use_idx, :]
             counts[layer_idx] += 1
             delta = probe_act - mean_activations[layer_idx]
             mean_activations[layer_idx] += delta / counts[layer_idx]
@@ -301,9 +325,31 @@ def run_abliteration(args: argparse.Namespace):
 
     # Import datasets lazily to avoid heavy imports at module import time (helps tests import parse_args)
     from datasets import load_dataset
+    def _load_maybe_local_json(path_str: str):
+        """Load a dataset which may be a local JSON/JSONL file or a dataset id.
 
-    harmless_dataset = load_dataset(harmless_ds_path)["train"]
-    harmful_dataset = load_dataset(harmful_ds_path)["train"]
+        If `path_str` points to a local .json or .jsonl file, use the
+        `json` loader with `data_files` so the file is accepted. Otherwise
+        attempt to load it as a normal dataset identifier.
+        """
+        p = Path(path_str)
+        # If it's a local file and looks like JSON/JSONL, use the json loader
+        if p.is_file() and p.suffix in (".json", ".jsonl"):
+            ds = load_dataset("json", data_files=str(p))
+        else:
+            try:
+                ds = load_dataset(path_str)
+            except Exception:
+                # Fallback: try treating it as a json file path
+                ds = load_dataset("json", data_files=str(p))
+
+        # Common case: datasets return a dict with a 'train' split
+        if isinstance(ds, dict) and "train" in ds:
+            return ds["train"]
+        return ds
+
+    harmless_dataset = _load_maybe_local_json(harmless_ds_path)
+    harmful_dataset = _load_maybe_local_json(harmful_ds_path)
     num_layers = model_config["num_hidden_layers"]
     logging.info(f"Model loaded with {num_layers} layers.", extra={"extra_info": {"component": "cli", "event": "loading_end", "actual_output": {"num_layers": num_layers}}})
 
@@ -321,6 +367,7 @@ def run_abliteration(args: argparse.Namespace):
         probe_debug=args.probe_debug,
         probe_debug_n=args.probe_debug_n,
         probe_mode=args.probe_mode,
+        probe_span=args.probe_span,
     )
     harmless_activations = get_mean_activations(
         harmless_dataset,
@@ -334,6 +381,7 @@ def run_abliteration(args: argparse.Namespace):
         probe_debug_n=args.probe_debug_n,
         probe_debug_full=args.probe_debug_full,
         probe_mode=args.probe_mode,
+        probe_span=args.probe_span,
     )
     logging.info("Activation probing complete", extra={"extra_info": {"component": "cli", "event": "probing_end"}})
 
@@ -352,14 +400,125 @@ def run_abliteration(args: argparse.Namespace):
             }
         },
     )
-    refusal_vector = calculate_refusal_direction(
-        harmful_activations[use_layer_idx],
-        harmless_activations[use_layer_idx]
-    )
-    logging.info("Refusal vector computed", extra={"extra_info": {"component": "cli", "event": "vector_computation_end", "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}})
+    # If ablate_k > 1, compute top-k PCA components of (harmful - harmless) per-example activations
+    if args.ablate_k and args.ablate_k > 1:
+        import numpy as _np
+
+        # Collect per-example probe activations for the chosen layer using the same
+        # probe selection logic (marker, probe_mode, probe_span). Limit to args.pca_sample.
+        def collect_per_example_means(dataset, max_samples: int = 512):
+            res = []
+            collected = 0
+            if final_probe_marker and final_probe_marker.strip():
+                marker_tokens = mx.array(tokenizer.encode(final_probe_marker, add_special_tokens=False))
+                try:
+                    marker_list = marker_tokens.tolist()
+                except Exception:
+                    marker_list = None
+            else:
+                marker_tokens = None
+                marker_list = None
+
+            for item in dataset:
+                if collected >= max_samples:
+                    break
+                prompt = item.get("prompt") or item.get("text")
+                if not prompt:
+                    continue
+                tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
+                if len(tokens) > model_config.get("max_position_embeddings", 4096):
+                    tokens = tokens[: model_config.get("max_position_embeddings", 4096)]
+
+                _, cap = wrapper(tokens[None], mask=None, layers_to_probe=[use_layer_idx])
+                arr = cap.get(use_layer_idx)
+                if arr is None:
+                    continue
+
+                # Decide probe index/span consistent with get_mean_activations
+                probe_idx = -1
+                probe_idx_list = None
+                if marker_list:
+                    token_list = tokens.tolist()
+                    found = False
+                    for i in range(len(token_list) - len(marker_list), -1, -1):
+                        if token_list[i:i + len(marker_list)] == marker_list:
+                            if args.probe_mode == "follow-token":
+                                potential_idx = i + len(marker_list)
+                                probe_idx = potential_idx if potential_idx < len(token_list) else i + len(marker_list) - 1
+                            elif args.probe_mode == "marker-token":
+                                probe_idx = i + len(marker_list) - 1
+                            elif args.probe_mode == "thinking-span":
+                                start = i + len(marker_list)
+                                if start < len(token_list):
+                                    end = min(len(token_list), start + args.probe_span)
+                                    probe_idx_list = list(range(start, end))
+                                else:
+                                    probe_idx = i + len(marker_list) - 1
+                            elif args.probe_mode == "last-token":
+                                probe_idx = len(token_list) - 1
+                            found = True
+                            break
+
+                # Extract vector according to chosen indices
+                if probe_idx_list is not None:
+                    valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < arr.shape[1]]
+                    if valid_idxs:
+                        vec = arr[0, valid_idxs, :].mean(axis=0)
+                    else:
+                        vec = arr[0, -1, :]
+                else:
+                    use_idx = probe_idx if (0 <= probe_idx < arr.shape[1]) else arr.shape[1] - 1
+                    vec = arr[0, use_idx, :]
+
+                res.append(_np.array(vec))
+                collected += 1
+
+            if not res:
+                raise RuntimeError("Could not collect per-example activations for PCA")
+            return _np.stack(res, axis=0)
+
+        harm_mat = collect_per_example_means(harmful_dataset, max_samples=args.pca_sample)
+        harm_mat_mean = harm_mat.mean(axis=0)
+        harm_centered = harm_mat - harm_mat_mean
+        harm_u, harm_s, harm_vt = _np.linalg.svd(harm_centered, full_matrices=False)
+
+        harm_components = harm_vt[: args.ablate_k]
+
+        harmless_mat = collect_per_example_means(harmless_dataset, max_samples=args.pca_sample)
+        harmless_mat_mean = harmless_mat.mean(axis=0)
+        harmless_centered = harmless_mat - harmless_mat_mean
+        harmless_u, harmless_s, harmless_vt = _np.linalg.svd(harmless_centered, full_matrices=False)
+
+        harmless_components = harmless_vt[: args.ablate_k]
+
+        # Strategy: use the top-k components from harmful set
+        pc_vecs = _np.array(harm_components)
+        import mlx.core as _mx
+
+        refusal_vector = _mx.array(pc_vecs)
+    else:
+        refusal_vector = calculate_refusal_direction(
+            harmful_activations[use_layer_idx],
+            harmless_activations[use_layer_idx]
+        )
+    # Compute a safe float norm for logging (handles numpy floats or mx arrays)
+    try:
+        norm_val = mx.linalg.norm(refusal_vector)
+        try:
+            norm_float = float(norm_val.item())
+        except Exception:
+            norm_float = float(norm_val)
+    except Exception:
+        # Fallback: try plain float conversion
+        try:
+            norm_float = float(refusal_vector)
+        except Exception:
+            norm_float = 0.0
+
+    logging.info("Refusal vector computed", extra={"extra_info": {"component": "cli", "event": "vector_computation_end", "actual_output": {"refusal_vector_norm": norm_float}}})
 
     logging.info("Orthogonalizing weights and updating model", extra={"extra_info": {"component": "cli", "event": "orthogonalization_start"}})
-    ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=args.ablation_strength)
+    ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=args.ablation_strength, ablation_method=args.ablate_method)
     model.update(ablated_params)
     mx.eval(model.parameters())
     logging.info("Model parameters updated", extra={"extra_info": {"component": "cli", "event": "orthogonalization_end"}})
@@ -371,15 +530,15 @@ def run_abliteration(args: argparse.Namespace):
         "harmful_dataset": args.harmful_dataset,
         "probed_layers": layers_to_probe,
         "ablation_vector_from_layer": use_layer_idx,
-        "timestamp": datetime.utcnow().isoformat(),
-        "refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "refusal_vector_norm": norm_float
     }
     # Correctly call save_ablated_model with the updated model object
     save_ablated_model(
         output_dir=args.output_dir,
         model=model,
         tokenizer=tokenizer,
-        config=model.config,
+        config=model_config,
         abliteration_log=abliteration_log,
         source_model_path=str(model_path)
     )

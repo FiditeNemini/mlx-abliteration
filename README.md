@@ -178,6 +178,8 @@ Key flags (most common):
 - `-s / --ablation-strength`: multiplier for ablation effect (float, default 1.0)
 - `--probe-marker`: optional string marker to locate the probe token (e.g. `</thinking>`). If omitted, the code attempts to extract a marker from `tokenizer_config.json` or falls back to the last token.
 - `--probe-mode`: `follow-token|marker-token|last-token` — how to choose which token to probe when a marker is found.
+- `--probe-mode`: `follow-token|marker-token|last-token|thinking-span` — how to choose which token(s) to probe when a marker is found. Use `thinking-span` to average a small window of tokens following a marker (see experimental features below).
+- `--ablate-method`: `projection|sequential` — how to remove the identified components from model weights. `projection` (default) builds a projection matrix from the top-k components and removes that subspace in one step; `sequential` subtracts projections component-by-component (legacy behavior). Use `projection` for multi-component ablation (recommended).
 - `--probe-debug`: emit a few tokenization/probe diagnostics (useful for troubleshooting marker/tokenization mismatches)
 
 Example (full):
@@ -343,6 +345,41 @@ python cli.py -m ./dummy_model -o ./out_dummy --harmless-dataset ./generated_dat
 # Launch the Gradio GUI
 python gui.py
 ```
+
+## Recommended ablation command (thinking-span + projection)
+
+For models that use an explicit thinking or internal monologue marker (e.g. `</think>`), a good starting CLI is to probe a small span after the marker and remove the top component via projection:
+
+```bash
+python cli.py \
+    -m /path/to/your/model \
+    -o ./outputs/ablated-model \
+    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
+    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
+    --probe-mode thinking-span \
+    --probe-span 3 \
+    --ablate-k 1 \
+    --ablate-method projection \
+    --ablation-strength 1.0
+```
+
+Start with `--ablation-strength 0` to run a no-op save first (verifies probing, vector computation, and serialization):
+
+```bash
+python cli.py -m /path/to/your/model -o ./out_dummy --ablation-strength 0 --probe-mode thinking-span --probe-span 3 --ablate-method projection
+```
+
+Dry-run tests
+---------------
+There is an optional pytest that will run a dry-run of the CLI against a real, small local model. It is skipped by default; to enable it set the `REAL_MODEL_DIR` environment variable to the model directory and run pytest. Example:
+
+```bash
+# set to a local small model dir (must contain config.json and tokenizer_config.json)
+export REAL_MODEL_DIR=/path/to/small-model
+pytest -q tests/test_dry_run_real_model.py
+```
+
+The test will run the full probing and PCA/ablation code paths but will not overwrite your model (the test patches the save routine to avoid destructive writes). Use this to validate the full pipeline on a target model before running irreversible ablations.
 
 ---
 

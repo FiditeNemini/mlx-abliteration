@@ -153,7 +153,7 @@ def calculate_refusal_direction(mean_harmful_activations: mx.array, mean_harmles
     return refusal_dir
 
 
-def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None, ablation_strength: float = 1.0) -> Dict:
+def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None, ablation_strength: float = 1.0, ablation_method: str = "projection") -> Dict:
     """
     Orthogonalizes the weights of target modules with respect to the refusal vector.
 
@@ -167,18 +167,42 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
         target_modules (Optional[List[str]]): A list of module names to target for
             ablation. Defaults to `["self_attn.o_proj", "mlp.down_proj", "mlp.c_proj"]`.
 
+    Args:
+        ablation_method (str): Either 'sequential' to subtract projections for each component
+            sequentially (legacy behavior), or 'projection' to build a projection matrix
+            P = sum_i v_i v_i^T and remove P @ W in one step. Defaults to 'projection'.
+
     Returns:
         Dict: A dictionary of the updated model parameters.
     """
     if target_modules is None:
         target_modules = ["self_attn.o_proj", "mlp.down_proj", "mlp.c_proj"]
 
-    # Normalize the refusal vector
-    v_norm = refusal_vector / (mx.linalg.norm(refusal_vector) + 1e-9)
+    # Support single-vector (shape [H]) or multiple components (shape [K, H])
+    # Ensure refusal_vector is an array with leading dimension = K (number of components)
+    rv = refusal_vector
+    if rv.ndim == 1:
+        rv = rv[None, :]
 
-    # Pre-calculate projection matrices for efficiency
-    v_proj = v_norm[:, None]
-    v_norm_T = v_norm[None, :]
+    # Normalize each component
+    v_norms = []
+    for i in range(rv.shape[0]):
+        v = rv[i]
+        v_norm = v / (mx.linalg.norm(v) + 1e-9)
+        v_norms.append(v_norm)
+
+    # Pre-calculate projection column vectors for each component
+    v_projs = [v[None, :].T for v in v_norms]  # each is [H,1]
+    v_norm_Ts = [v[None, :] for v in v_norms]  # each is [1,H]
+
+    # If using projection method, build P = sum_i v_i v_i^T
+    P = None
+    if ablation_method == "projection":
+        try:
+            # build projection matrix as sum outer products of unit vectors
+            P = sum((v[:, None] @ v[None, :]) for v in v_norms)
+        except Exception:
+            P = None
 
     flat_params = tree_flatten(model.parameters())
     params_dict = dict(flat_params)
@@ -215,12 +239,24 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
 
             # Dequantize, ablate, and then re-quantize
             w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
-            proj_W_on_v = v_proj @ (v_norm_T @ w_float)
-            w_ablated_float = w_float - ablation_strength * proj_W_on_v
+            if ablation_method == "projection" and P is not None:
+                # apply projection removal in one step: subtract P @ w_float for each column
+                proj = P @ w_float
+                w_ablated_float = w_float - ablation_strength * proj
+            else:
+                # Sequentially remove projections onto each component
+                w_ablated_float = w_float
+                for v_proj_i, v_norm_T_i in zip(v_projs, v_norm_Ts):
+                    proj_W_on_v = v_proj_i @ (v_norm_T_i @ w_ablated_float)
+                    w_ablated_float = w_ablated_float - ablation_strength * proj_W_on_v
 
-            # Verification check
-            check_norm = mx.linalg.norm(v_norm_T @ w_ablated_float).item()
-            logger.info(f"Orthogonalization check for {key}: norm is {check_norm:.4e}", extra={"extra_info": {"event": "ortho_check", "inputs": {"key": key}, "actual_output": {"norm": check_norm}}})
+            # Verification check: compute max residual projection norm across components
+            try:
+                norms = [float(mx.linalg.norm(v_norm_T_i @ w_ablated_float).item()) for v_norm_T_i in v_norm_Ts]
+                check_norm = max(norms) if norms else 0.0
+            except Exception:
+                check_norm = None
+            logger.info(f"Orthogonalization check for {key}: norm is {check_norm}", extra={"extra_info": {"event": "ortho_check", "inputs": {"key": key}, "actual_output": {"norm": check_norm}}})
 
             new_w, new_scales, new_biases = mx.quantize(w_ablated_float, module.group_size, module.bits)
 
@@ -233,13 +269,23 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
         # Handle standard linear layers
         elif W.ndim == 2:
             # Project the weight matrix onto the refusal vector
-            proj_W_on_v = v_proj @ (v_norm_T @ W)
-            # Subtract the projection to make the new weights orthogonal to the vector
-            W_ablated = W - ablation_strength * proj_W_on_v
+            # Sequentially remove projections onto each component
+            if ablation_method == "projection" and P is not None:
+                proj = P @ W
+                W_ablated = W - ablation_strength * proj
+            else:
+                W_ablated = W
+                for v_proj_i, v_norm_T_i in zip(v_projs, v_norm_Ts):
+                    proj_W_on_v = v_proj_i @ (v_norm_T_i @ W_ablated)
+                    W_ablated = W_ablated - ablation_strength * proj_W_on_v
 
-            # Verification check
-            check_norm = mx.linalg.norm(v_norm_T @ W_ablated).item()
-            logger.info(f"Orthogonalization check for {key}: norm is {check_norm:.4e}", extra={"extra_info": {"event": "ortho_check", "inputs": {"key": key}, "actual_output": {"norm": check_norm}}})
+            # Verification check: compute max residual projection norm across components
+            try:
+                norms = [float(mx.linalg.norm(v_norm_T_i @ W_ablated).item()) for v_norm_T_i in v_norm_Ts]
+                check_norm = max(norms) if norms else 0.0
+            except Exception:
+                check_norm = None
+            logger.info(f"Orthogonalization check for {key}: norm is {check_norm}", extra={"extra_info": {"event": "ortho_check", "inputs": {"key": key}, "actual_output": {"norm": check_norm}}})
 
             new_flat_params.append((key, W_ablated))
             modified_count += 1
