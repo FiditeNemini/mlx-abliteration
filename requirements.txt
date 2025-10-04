@@ -18,3 +18,5 @@ gradio
 pytest
 black
 flake8
+
+jinja2

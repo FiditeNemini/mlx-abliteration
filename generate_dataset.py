@@ -6,6 +6,11 @@ from pathlib import Path
 
 import yaml
 from tqdm import tqdm
+from core.utils import extract_eot_from_chat_template
+try:
+    from jinja2 import Template
+except Exception:
+    Template = None
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -84,6 +89,30 @@ def generate_datasets(args: argparse.Namespace):
         harmless_path.unlink()
 
     with open(harmful_path, 'w') as f_harmful, open(harmless_path, 'w') as f_harmless:
+        # If a model path was provided, try to load its chat template and probe marker
+        model_chat_template = None
+        model_probe_marker = None
+        if args.model:
+            model_path = Path(args.model)
+            tokenizer_config_path = model_path / "tokenizer_config.json"
+            if tokenizer_config_path.is_file():
+                try:
+                    with open(tokenizer_config_path, "r") as tf:
+                        import json as _json
+
+                        tok_cfg = _json.load(tf)
+                    chat_template = tok_cfg.get("chat_template")
+                    if chat_template:
+                        model_chat_template = chat_template
+                        model_probe_marker = extract_eot_from_chat_template(chat_template)
+                except Exception:
+                    # Fail quietly and fall back to YAML templates
+                    model_chat_template = None
+                    model_probe_marker = None
+
+        # Decide final probe marker: CLI override > model template marker > args.probe_marker
+        final_model_marker = args.probe_marker or model_probe_marker
+
         for _ in tqdm(range(num_samples), desc="Generating Samples"):
             concept = random.choice(concepts)
             template_obj = random.choice(templates)
@@ -98,18 +127,50 @@ def generate_datasets(args: argparse.Namespace):
                     # Template didn't use {marker}; leave prompt as-is and we may append below
                     template_prompt = template_obj['prompt']
 
-            # Generate harmful prompt
-            harmful_prompt = template_prompt.format(behavior=concept['harmful_value'])
-            if args.probe_marker and args.append_marker:
-                harmful_prompt = harmful_prompt + (" " if not harmful_prompt.endswith(" ") else "") + args.probe_marker
+            # Generate the raw harmful/harmless prompts (the behavior slot filled)
+            harmful_core = template_prompt.format(behavior=concept['harmful_value'])
+            harmless_core = template_prompt.format(behavior=concept['harmless_value'])
+
+            def render_with_model(core_prompt: str) -> str:
+                """Render the core prompt into the model's chat template if available.
+
+                We pass a `message` object with `.content` to match expected templates.
+                If Jinja2 is available we render using it; otherwise we do a simple replacement of
+                the `{{ message.content }}` substring if present. Finally, ensure the probe marker
+                (from CLI or model template) is present at the end if requested.
+                """
+                rendered = core_prompt
+                if model_chat_template:
+                    try:
+                        if Template is not None:
+                            tmpl = Template(model_chat_template)
+                            rendered = tmpl.render(message={"content": core_prompt})
+                        else:
+                            # naive fallback: replace typical jinja variable
+                            rendered = model_chat_template.replace("{{ message.content }}", core_prompt)
+                    except Exception:
+                        # on any failure fall back to core prompt
+                        rendered = core_prompt
+
+                # Ensure probe marker is present at end if we have one
+                marker_to_use = final_model_marker
+                if marker_to_use:
+                    if not rendered.strip().endswith(marker_to_use):
+                        sep = " " if not rendered.endswith(" ") else ""
+                        rendered = rendered + sep + marker_to_use
+                else:
+                    # If user explicitly asked to append marker via flag, use that
+                    if args.probe_marker and args.append_marker:
+                        sep = " " if not rendered.endswith(" ") else ""
+                        rendered = rendered + sep + args.probe_marker
+
+                return rendered
+
+            harmful_prompt = render_with_model(harmful_core)
+            harmless_prompt = render_with_model(harmless_core)
 
             harmful_record = {"prompt": harmful_prompt, "source_concept": concept['name'], "source_template": template_obj['id']}
             f_harmful.write(json.dumps(harmful_record) + '\n')
-
-            # Generate harmless prompt
-            harmless_prompt = template_prompt.format(behavior=concept['harmless_value'])
-            if args.probe_marker and args.append_marker:
-                harmless_prompt = harmless_prompt + (" " if not harmless_prompt.endswith(" ") else "") + args.probe_marker
 
             harmless_record = {"prompt": harmless_prompt, "source_concept": concept['name'], "source_template": template_obj['id']}
             f_harmless.write(json.dumps(harmless_record) + '\n')

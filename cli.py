@@ -30,7 +30,6 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 import mlx.core as mx
-from datasets import load_dataset
 from tqdm import tqdm
 import mlx_lm
 
@@ -299,6 +298,9 @@ def run_abliteration(args: argparse.Namespace):
         raise FileNotFoundError(f"Could not find 'config.json' in the model directory: {model_path}")
     with open(config_path, "r") as f:
         model_config = json.load(f)
+
+    # Import datasets lazily to avoid heavy imports at module import time (helps tests import parse_args)
+    from datasets import load_dataset
 
     harmless_dataset = load_dataset(harmless_ds_path)["train"]
     harmful_dataset = load_dataset(harmful_ds_path)["train"]
