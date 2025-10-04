@@ -9,6 +9,7 @@ __pycache__/
 .env.*
 /generated_datasets/*
 /outputs/*
+/out_dry_run/
 
 # Python virtual environments
 .venv/
