@@ -413,7 +413,6 @@ def run_abliteration_stream(
                     probe_idx_list = None
                     if marker_list:
                         token_list = tokens.tolist()
-                        found = False
                         for i in range(len(token_list) - len(marker_list), -1, -1):
                             if token_list[i:i + len(marker_list)] == marker_list:
                                 if probe_mode == "follow-token":
@@ -430,7 +429,6 @@ def run_abliteration_stream(
                                         probe_idx = i + len(marker_list) - 1
                                 elif probe_mode == "last-token":
                                     probe_idx = len(token_list) - 1
-                                found = True
                                 break
 
                     if probe_idx_list is not None:
@@ -462,7 +460,7 @@ def run_abliteration_stream(
             harmless_centered = harmless_mat - harmless_mat_mean
             harmless_u, harmless_s, harmless_vt = _np.linalg.svd(harmless_centered, full_matrices=False)
 
-            harmless_components = harmless_vt[: ablate_k]
+            # harmless_components intentionally not used; we only use harm_components
 
             pc_vecs = _np.array(harm_components)
             import mlx.core as _mx
