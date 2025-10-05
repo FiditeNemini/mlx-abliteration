@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     output_group.add_argument("-o", "--output-dir", type=str, required=True, help="Directory to save the abliterated model.")
     output_group.add_argument("--cache-dir", type=str, default=".cache", help="Cache directory for downloads.")
     output_group.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging.")
+    output_group.add_argument("--dump-dequant", action="store_true", help="Write dequantized .npy dumps for ablated tensors into the output directory (debug).")
     return parser.parse_args()
 
 def parse_layers(layers_str: str, num_model_layers: int) -> List[int]:
@@ -541,6 +542,8 @@ def run_abliteration(args: argparse.Namespace):
         config=model_config,
         abliteration_log=abliteration_log,
         source_model_path=str(model_path)
+        ,
+        dump_dequant=bool(getattr(args, "dump_dequant", False)),
     )
     logging.info("Abliterated model saved", extra={"extra_info": {"component": "cli", "event": "saving_end", "actual_output": {"output_dir": args.output_dir}}})
     # If called programmatically, optionally return the computed mean activations

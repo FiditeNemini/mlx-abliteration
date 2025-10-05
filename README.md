@@ -393,6 +393,50 @@ Start with `--ablation-strength 0` to run a no-op save first (verifies probing, 
 
 ```bash
 python cli.py -m /path/to/your/model -o ./out_dummy --ablation-strength 0 --probe-mode thinking-span --probe-span 3 --ablate-method projection
+
+## Selective dequantized dumps (debugging)
+
+When diagnosing whether an ablation actually changed model weights (especially
+for quantized/sharded models), it's easy to be misled by packed integer shard
+differences. The toolkit includes an optional selective dequantized dump that
+writes dequantized float arrays for only the tensors that changed numerically
+during ablation. This makes it straightforward to inspect and compare actual
+float-level differences.
+
+How it works
+- The feature reads the source model's safetensors (via the index if present)
+    and compares each weight tensor to the ablated version.
+- Only tensors whose numeric difference norm is non-zero are written.
+- For quantized layers (handled for `QuantizedLinear`), the tool will
+    dequantize the ablated packed weights before writing the .npy dump.
+
+Where dumps are written
+- Dumps are written to: `<output_dir>/dequant_dumps/`
+- Files are named by replacing `.` in the parameter key with `_` and adding
+    the `.npy` extension (for example `model_layers_0_mlp_down_proj_weight.npy`).
+
+CLI example
+
+```bash
+# Run abliteration and write selective dequantized dumps for changed tensors
+python cli.py -m /path/to/your/model -o ./outputs/ablated-with-dumps --dump-dequant
+```
+
+GUI example
+
+- Launch the Gradio UI: `python gui.py`
+- In Advanced Parameters, check the box labeled "Dump Dequantized .npy" and run
+    the pipeline as usual. When complete, open the returned output directory and
+    inspect `dequant_dumps/`.
+
+Notes and caveats
+- Dumps are intended for debugging and verification. They can be large for
+    large models; enable only when needed.
+- The selective logic avoids creating a dump for tensors that did not change,
+    reducing disk usage compared to a full dump of all ablated tensors.
+- The feature is defensive: any failures while reading source tensors or writing
+    dumps are logged but do not abort the save process.
+
 ```
 
 Dry-run tests

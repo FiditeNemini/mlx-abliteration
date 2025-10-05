@@ -44,6 +44,7 @@ from core.logging_config import setup_structured_logging
 from core.utils import extract_eot_from_chat_template
 import mlx.core as mx
 import mlx_lm
+from mlx_lm.utils import tree_flatten
 from datasets import load_dataset
 
 def get_mean_activations_from_dataset(
@@ -233,6 +234,7 @@ def run_abliteration_stream(
     pca_sample: int = 512,
     cache_dir: str = ".cache",
     verbose: bool = False,
+    dump_dequant: bool = False,
     progress=gr.Progress(),
 ) -> Generator[Tuple[str, None] | Tuple[str, str], None, None]:
     """
@@ -473,8 +475,53 @@ def run_abliteration_stream(
         yield log_and_yield(f"Refusal vector computed from layer {actual_use_layer}.", {"event": "vector_computation_end", "inputs": {"use_layer": actual_use_layer}, "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}), None
 
         yield log_and_yield("Orthogonalizing Weights & Updating Model", {"event": "orthogonalization_start"}), None
+        # Snapshot 'before' parameters so we can detect whether model.update
+        # actually applied changes in-memory.
+        try:
+            try:
+                before = dict(tree_flatten(model.parameters()))
+            except Exception:
+                before = {}
+        except Exception:
+            before = {}
+
         ablated_params = get_ablated_parameters(model, refusal_vector, ablation_strength=ablation_strength)
         model.update(ablated_params)
+
+        # Now compute diffs between the before snapshot and the current
+        # model.parameters() after the update.
+        try:
+            try:
+                after = dict(tree_flatten(model.parameters()))
+            except Exception:
+                after = {}
+
+            # If we can compute a diff, log per-key norms for keys reported in 'ablated_params'
+            for k in (ablated_params.keys() if isinstance(ablated_params, dict) else []):
+                orig_v = before.get(k)
+                new_v = after.get(k)
+                if orig_v is None:
+                    logging.info(f"Post-update check: original parameter not found for key {k}", extra={"extra_info": {"event": "post_update_missing_orig", "inputs": {"key": k}}})
+                    continue
+                if new_v is None:
+                    logging.info(f"Post-update check: updated parameter not found for key {k}", extra={"extra_info": {"event": "post_update_missing_new", "inputs": {"key": k}}})
+                    continue
+
+                try:
+                    diff = mx.array(orig_v) - mx.array(new_v)
+                    max_abs = float(mx.linalg.norm(diff).item())
+                except Exception:
+                    import numpy as _np
+
+                    try:
+                        max_abs = float(_np.linalg.norm(_np.array(orig_v) - _np.array(new_v)))
+                    except Exception:
+                        max_abs = None
+
+                logging.info(f"Post-update in-memory diff for {k}: {max_abs}", extra={"extra_info": {"event": "post_update_diff", "inputs": {"key": k}, "actual_output": {"max_abs_diff": max_abs}}})
+        except Exception:
+            logging.debug("Could not compute post-update in-memory diffs", exc_info=True)
+
         mx.eval(model.parameters())
         yield log_and_yield("Model weights have been updated.", {"event": "orthogonalization_end"}), None
 
@@ -485,7 +532,7 @@ def run_abliteration_stream(
         }
 
         save_ablated_model(
-            str(output_path), model, tokenizer, model_config, abliteration_log, source_model_path=str(model_path)
+            str(output_path), model, tokenizer, model_config, abliteration_log, source_model_path=str(model_path), dump_dequant=bool(dump_dequant)
         )
 
         # Determine the correct output path to display (directory for sharded, file for single)
@@ -538,6 +585,7 @@ def create_ui() -> gr.Blocks:
                         pca_sample_input = gr.Number(label="PCA Sample", value=512, precision=0, info="Max per-example samples to collect for PCA when ablate-k > 1")
                         cache_dir_input = gr.Textbox(label="Cache Directory", value=".cache", info="Directory used for downloads and caching.")
                         verbose_checkbox = gr.Checkbox(label="Verbose Logging", value=False, info="Enable verbose (debug) logging for the GUI process.")
+                        dump_dequant_checkbox = gr.Checkbox(label="Dump Dequantized .npy", value=False, info="Write dequantized numpy dumps for ablated tensors into the output directory (debug only).")
                     with gr.TabItem("Dry-run Report"):
                         report_file = gr.File(label="Dry-run Suggestions JSON (outputs/diag_out/dry_run_suggestions.json)", interactive=True)
                         report_table = gr.Dataframe(headers=["layer", "diff_norm"], datatype=["number", "number"], interactive=False, label="Per-layer diff norms")
@@ -600,6 +648,7 @@ def create_ui() -> gr.Blocks:
             pca_sample_input,
             cache_dir_input,
             verbose_checkbox,
+            dump_dequant_checkbox,
         ]
         for inp in inputs:
             inp.change(lambda: (None, None), outputs=[log_output, output_file_display])
