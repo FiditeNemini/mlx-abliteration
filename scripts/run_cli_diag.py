@@ -35,6 +35,7 @@ def make_args(model: str, output_dir: str = "./outputs/diag_out", probe_marker: 
     a.probe_debug = True
     a.probe_debug_n = 3
     a.probe_debug_full = True
+    a.probe_strip_newline = False
     # new CLI options (defaults)
     a.probe_mode = "follow-token"
     a.probe_span = 1
@@ -49,9 +50,12 @@ def main():
     parser.add_argument("-m", "--model", required=True, help="Path or hub id to the source model (required).")
     parser.add_argument("-o", "--output-dir", default="./outputs/diag_out", help="Output directory for suggestions (default: ./outputs/diag_out)")
     parser.add_argument("--probe-marker", default="</think>", help="Optional probe marker token to use (default: </think>)")
+    parser.add_argument("--strip-marker-newline", action="store_true", help="If set, strip a trailing newline from the probe marker before tokenization.")
     parsed = parser.parse_args()
 
     args = make_args(model=parsed.model, output_dir=parsed.output_dir, probe_marker=parsed.probe_marker)
+    # propagate optional strip flag
+    args.probe_strip_newline = bool(getattr(parsed, "strip_marker_newline", False))
     try:
         # Request the CLI to return mean activations so we don't re-run probes here
         setattr(args, "return_means", True)

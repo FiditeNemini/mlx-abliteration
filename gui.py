@@ -41,7 +41,7 @@ from core.abliteration import (
     save_ablated_model,
 )
 from core.logging_config import setup_structured_logging
-from core.utils import extract_eot_from_chat_template
+from core.utils import extract_eot_from_chat_template, normalize_marker
 import mlx.core as mx
 import mlx_lm
 from mlx_lm.utils import tree_flatten
@@ -229,6 +229,7 @@ def run_abliteration_stream(
     probe_debug: bool = False,
     probe_debug_n: int = 3,
     probe_debug_full: bool = False,
+    probe_strip_newline: bool = False,
     ablate_k: int = 1,
     ablate_method: str = "projection",
     pca_sample: int = 512,
@@ -315,6 +316,14 @@ def run_abliteration_stream(
         if not final_probe_marker or not final_probe_marker.strip():
             yield log_and_yield("No probe marker found. Defaulting to last token.", {"event": "probe_marker_fallback_end"}), None
             final_probe_marker = None
+
+        # Optionally normalize the marker (strip a single trailing newline) to
+        # accommodate tokenizers that don't include trailing newlines in marker
+        # tokenization. This mirrors the CLI --strip-marker-newline behavior.
+        try:
+            final_probe_marker = normalize_marker(final_probe_marker, strip_trailing_newline=bool(probe_strip_newline))
+        except Exception:
+            pass
 
 
         config_path = Path(model_path) / "config.json"
@@ -577,6 +586,7 @@ def create_ui() -> gr.Blocks:
                         probe_debug_checkbox = gr.Checkbox(label="Probe Debug", value=False, info="Emit per-example probe index debug lines into the log.")
                         probe_debug_n_input = gr.Number(label="Probe Debug N", value=3, precision=0)
                         probe_debug_full_checkbox = gr.Checkbox(label="Probe Debug Full Tokens", value=False, info="When debug enabled, show token strings if available.")
+                        probe_strip_newline_checkbox = gr.Checkbox(label="Strip trailing newline from marker", value=False, info="If set, remove a single trailing newline from extracted or pasted probe markers before tokenization.")
                         gr.Markdown("---")
                         ablate_k_input = gr.Number(label="Ablate k (top components)", value=1, precision=0, info="Number of top PCA components to ablate. 1 = single vector.")
                         ablate_method_input = gr.Dropdown(label="Ablation Method", choices=["projection", "sequential"], value="projection", info="Method used to ablate components.")
@@ -641,6 +651,7 @@ def create_ui() -> gr.Blocks:
             probe_debug_checkbox,
             probe_debug_n_input,
             probe_debug_full_checkbox,
+            probe_strip_newline_checkbox,
             ablate_k_input,
             ablate_method_input,
             pca_sample_input,

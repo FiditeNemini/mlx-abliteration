@@ -85,18 +85,17 @@ If you add or change logic in `core/abliteration.py`, add tests under `tests/` m
 
 1) Structured logs
 
-- The CLI and GUI call `core.logging_config.setup_structured_logging(...)` at startup. Logs are JSON-structured and include `extra_info` for telemetry. If you need to inspect the persistent log file, check the path configured in `core/logging_config.py`.
 
 2) Probe marker / tokenization issues
 
-- Use `--probe-debug` (CLI) or the "Probe Debug" option in the GUI to see per-example probe indices and tokenization samples.
-- If the marker isn't found, the code will fallback to the last token and emit a compact diagnostic describing a few sample prompts and the marker token ids. This is usually enough to identify off-by-one tokenization or mismatched marker strings.
 
 Example CLI debug run:
 
 ```bash
 python cli.py -m ./dummy_model -o ./out_dummy --harmless-dataset ./generated_datasets/harmless_dataset.jsonl --harmful-dataset ./generated_datasets/harmful_dataset.jsonl --probe-marker '</thinking>' --probe-debug --probe-debug-n 5
 ```
+# If your marker includes a trailing newline that your tokenizer omits, strip it:
+python cli.py -m ./dummy_model -o ./out_dummy --harmless-dataset ./generated_datasets/harmless_dataset.jsonl --harmful-dataset ./generated_datasets/harmful_dataset.jsonl --ablation-strength 0 --probe-marker '</thinking>' --strip-marker-newline
 
 3) Inspecting captured activations
 

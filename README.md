@@ -178,6 +178,7 @@ Key flags (most common):
 - `-s / --ablation-strength`: multiplier for ablation effect (float, default 1.0)
 - `--probe-marker`: optional string marker to locate the probe token (e.g. `</thinking>`). If omitted, the code attempts to extract a marker from `tokenizer_config.json` or falls back to the last token.
 - `--probe-mode`: `follow-token|marker-token|last-token` — how to choose which token to probe when a marker is found.
+- `--strip-marker-newline`: if set, remove a single trailing newline (or CRLF) from an extracted or pasted probe marker before tokenization. This helps when tokenizers treat trailing newlines inconsistently across models.
 - `--probe-mode`: `follow-token|marker-token|last-token|thinking-span` — how to choose which token(s) to probe when a marker is found. Use `thinking-span` to average a small window of tokens following a marker (see experimental features below).
 - `--ablate-method`: `projection|sequential` — how to remove the identified components from model weights. `projection` (default) builds a projection matrix from the top-k components and removes that subspace in one step; `sequential` subtracts projections component-by-component (legacy behavior). Use `projection` for multi-component ablation (recommended).
 
@@ -204,7 +205,8 @@ python cli.py \
     --use-layer -1 \
     --ablation-strength 1.0 \
     --probe-marker '</thinking>' \
-    --probe-mode follow-token
+    --probe-mode follow-token \
+    --strip-marker-newline
 ```
 
 Notes:
@@ -387,12 +389,128 @@ python cli.py \
     --ablate-k 1 \
     --ablate-method projection \
     --ablation-strength 1.0
+
+# If your model's markers include a trailing newline that your tokenizer does not
+# include during tokenization, add --strip-marker-newline to remove it before
+# tokenization (CLI) or check the corresponding option in the GUI.
+python cli.py -m /path/to/your/model -o ./out_dummy --ablation-strength 0 --probe-mode thinking-span --probe-span 3 --ablate-method projection --strip-marker-newline
 ```
 
 Start with `--ablation-strength 0` to run a no-op save first (verifies probing, vector computation, and serialization):
 
 ```bash
 python cli.py -m /path/to/your/model -o ./out_dummy --ablation-strength 0 --probe-mode thinking-span --probe-span 3 --ablate-method projection
+
+## Example workflow — Dry runs to full ablation (GUI + CLI)
+
+This short walkthrough shows a safe, repeatable process to: run a dry-run, inspect results, apply suggestions through the GUI, and then perform the final ablation via the GUI or CLI. Each GUI step has an equivalent CLI command so you can reproduce the flow in scripts.
+
+1) Prepare the model and datasets
+
+- Create or identify a model directory (local or Hub id). Ensure `config.json` is present. If you plan to use marker-based probing, add `tokenizer_config.json` with a `chat_template` containing the marker (for example `</think>`).
+- Generate paired harmless/harmful datasets (or use provided examples):
+
+```bash
+python generate_dataset.py --num-samples 200 --output-dir ./generated_datasets --probe-marker '</think>' --append-marker
+```
+
+2) Dry-run: compute per-layer diagnostics (non-destructive)
+
+- CLI quick dry-run (no-op save): this runs the full pipeline but with `--ablation-strength 0` so nothing is changed on-disk.
+
+```bash
+python cli.py \
+    -m /path/to/your/model \
+    -o ./outputs/dry_run_out \
+    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
+    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
+    --probe-mode thinking-span \
+    --probe-span 2 \
+    --ablation-strength 0
+```
+
+- Scripted dry-run that returns a JSON suggestions file (recommended for automation):
+
+```bash
+python scripts/run_cli_diag.py -m /path/to/your/model -o ./outputs/diag_out --probe-marker '</think>'
+```
+
+What to look for: `dry_run_suggestions.json` (or `dry_run_layer_stats.csv`) will contain per-layer diff norms and a `recommended_layers_top10` list. The `layer_stats` entries include `layer` and `diff_norm` — larger norms imply a stronger difference between harmful and harmless activations and are good candidates for computing the refusal vector.
+
+3) Interpret results and pick layers
+
+- Open `./outputs/diag_out/dry_run_suggestions.json` and inspect `layer_stats` (sorted by `diff_norm`).
+- Choose one or a small handful of layers with the largest `diff_norm`. Note the best single layer for `--use-layer` and a short list for the GUI "Layers to Probe" field.
+
+Example (pseudo-output):
+
+```json
+{
+    "layer_stats": [{"layer": 14, "diff_norm": 5.3}, {"layer": 15, "diff_norm": 4.9}, ...],
+    "recommended_layers_top10": [14, 15, 13, ...]
+}
+```
+
+4) Apply suggestions in the GUI
+
+- Start the UI: `python gui.py` and open the browser link.
+- Fill the Required Inputs: model path, harmless/harmful dataset, output directory.
+- Advanced Parameters:
+    - Paste the top recommended layers into "Layers to Probe" (e.g. `14,15,13`).
+    - Set "Use Refusal Vector from Layer" to your best candidate (e.g. `14`).
+    - Set "Probe Marker" to `</think>` (or leave empty to auto-detect). Use "Probe Mode" = `thinking-span` and "Probe Span" = `2` if the marker transition tokenizes to multiple tokens.
+    - If you want to verify tokenization, enable "Probe Debug" and run a short dry-run to see token samples.
+- Click "Start Abliteration" and watch the streaming log. If you previously chose `--ablation-strength 0`, the process will produce outputs and an `abliteration_log.json` without modifying weights.
+
+GUI-to-CLI equivalence (example):
+
+GUI action -> CLI flag
+
+- "Layers to Probe": `--layers 14,15,13`
+- "Use Refusal Vector from Layer": `--use-layer 14`
+- "Probe Marker": `--probe-marker '</think>'`
+- "Probe Mode": `--probe-mode thinking-span` and `--probe-span 2`
+
+5) Final ablation (safe two-step approach)
+
+- Step A: Verify by running an additional no-op run that includes the final parameters (repeat the `--ablation-strength 0` run to ensure probing and saving are correct).
+
+- Step B: Apply the actual ablation with a non-zero `--ablation-strength` (start with `1.0`).
+
+CLI (final ablation):
+
+```bash
+python cli.py \
+    -m /path/to/your/model \
+    -o ./outputs/ablated-final \
+    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
+    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
+    --layers 14,15,13 \
+    --use-layer 14 \
+    --probe-marker '</think>' \
+    --probe-mode thinking-span \
+    --probe-span 2 \
+    --ablate-k 1 \
+    --ablate-method projection \
+    --ablation-strength 1.0
+```
+
+GUI (final ablation):
+
+- In the same advanced panel, set "Ablation Strength" to `1.0` and "Ablate k" to `1` (or more if you intend to remove multiple principal components). Uncheck "Probe Debug" to reduce log noise.
+- Click "Start Abliteration" and wait for the pipeline to finish. The UI will return the saved model path (index or safetensors file).
+
+6) Verify and inspect
+
+- Use `--dump-dequant` (CLI) or "Dump Dequantized .npy" (GUI) to write dequantized dumps for changed tensors. Inspect the dumps under `<output_dir>/dequant_dumps/` to confirm nonzero changes.
+- Run quick functional checks (prompt the ablated model with previously harmful prompts) and compare outputs.
+
+Safety notes
+- Always start with `--ablation-strength 0` to validate the full run without modifying weights.
+- Keep backups of source model directories before performing destructive ablations.
+
+This workflow balances safety (dry-run + inspection) with interactivity (GUI) and reproducibility (CLI scripts). It also maps GUI controls to concrete CLI flags so you can automate the same process in CI or orchestration scripts.
+
 
 ## Selective dequantized dumps (debugging)
 
