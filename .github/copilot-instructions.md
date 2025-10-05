@@ -38,7 +38,7 @@ adjusting the CLI wiring in `cli.py` rather than large rewrites.
 - Run CLI (happy path):
 
   - Example: `python cli.py -m <model-path-or-hub-id> -o ./outdir`
-  - Common flags: `--harmless-dataset`, `--harmful-dataset`, `--layers`, `--use-layer`, `--probe-marker`, `--ablation-strength`, `--cache-dir`.
+  - Common flags: `--harmless-dataset`, `--harmful-dataset`, `--layers`, `--use-layer`, `--probe-marker`, `--strip-marker-newline`, `--ablation-strength`, `--cache-dir`.
 
 - Generate datasets: `python generate_dataset.py --template-file templates.yaml --num-samples 100`
 
@@ -57,6 +57,7 @@ adjusting the CLI wiring in `cli.py` rather than large rewrites.
 - Probe marker extraction: `extract_eot_from_chat_template` uses a conservative
   regex to find an end-of-thought marker in `tokenizer_config.json`'s `chat_template`.
   If you add new chat-template formats, update that function.
+  - Note: markers sometimes include a trailing newline that some tokenizers omit when tokenizing; use `--strip-marker-newline` (CLI) or the GUI checkbox to remove a single trailing newline from markers before tokenization when needed.
 - Quantized layers: code special-cases `QuantizedLinear` (dequantize -> ablate -> re-quantize).
   If adding support for other quantized layer types, mirror this pattern.
 

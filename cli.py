@@ -43,7 +43,7 @@ from core.abliteration import (
     save_ablated_model,
 )
 from core.logging_config import setup_structured_logging
-from core.utils import extract_eot_from_chat_template, tokenizer_marker_diff
+from core.utils import extract_eot_from_chat_template, tokenizer_marker_diff, normalize_marker
 
 def parse_args() -> argparse.Namespace:
     """Parses command-line arguments.
@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     abl_group.add_argument("--probe-debug", action="store_true", help="Enable probe debug output (dump tokenized prompts for first N examples).")
     abl_group.add_argument("--probe-debug-n", type=int, default=3, help="Number of sample prompts to dump when --probe-debug is set.")
     abl_group.add_argument("--probe-debug-full", action="store_true", help="When used with --probe-debug, also show token strings (if tokenizer supports convert_ids_to_tokens).")
+    abl_group.add_argument("--strip-marker-newline", action="store_true", help="If set, strip a single trailing newline from extracted probe markers before tokenization.")
     output_group = parser.add_argument_group("Output Configuration")
     output_group.add_argument("-o", "--output-dir", type=str, required=True, help="Directory to save the abliterated model.")
     output_group.add_argument("--cache-dir", type=str, default=".cache", help="Cache directory for downloads.")
@@ -315,6 +316,15 @@ def run_abliteration(args: argparse.Namespace):
     if not final_probe_marker or not final_probe_marker.strip():
         logging.info("No probe marker found. Defaulting to last token.", extra={"extra_info": {"component": "cli", "event": "probe_marker_fallback_end"}})
         final_probe_marker = None
+
+    # Optionally normalize the marker (strip a single trailing newline) to
+    # accommodate tokenizers that don't include trailing newlines in marker
+    # tokenization.
+    try:
+        final_probe_marker = normalize_marker(final_probe_marker, strip_trailing_newline=getattr(args, "strip_marker_newline", False))
+    except Exception:
+        # Normalization is best-effort; fall back to the raw marker if it fails.
+        pass
 
     config_path = Path(model_path) / "config.json"
     if not config_path.is_file():

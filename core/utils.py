@@ -55,15 +55,29 @@ def extract_eot_from_chat_template(template_str: str) -> str | None:
         Optional[str]: The extracted marker (e.g., '</think>') or None if not found.
     """
     import re
-    # This regex looks for a closing XML-like tag immediately following the 'message.content' part
-    # It captures the content of the tag (e.g., </think>)
-    match = re.search(r"\{\{.*?message\.content.*?\}\}(.*?)\{\{", template_str, re.DOTALL)
-    if match:
-        # The marker is the captured group, stripped of whitespace
-        marker = match.group(1).strip()
-        if marker:
-            return marker
-    return None
+    # This regex finds the part immediately following the `message.content` block
+    # and captures everything up to the next `{{` or the end of the string. This
+    # lets the function extract markers that are XML-like (e.g. </think>) or
+    # special tokens such as '<|im_start|>assistant\n' which may include newline
+    # characters. The use of (?=\{\{|\Z) ensures we stop before the next Jinja
+    # placeholder or at end-of-template.
+    match = re.search(r"\{\{.*?message\.content.*?\}\}(.*?)(?=\{\{|\Z)", template_str, re.DOTALL)
+    if not match:
+        return None
+
+    raw = match.group(1)
+    # If the captured string is only whitespace, treat it as no marker found.
+    if raw is None:
+        return None
+    if raw.strip() == "":
+        return None
+
+    # Preserve the captured text (including newlines) since some markers rely on
+    # trailing newline characters for correct tokenization. Trim only terminal
+    # spaces but keep newlines intact at the end of the marker.
+    # Strategy: rstrip spaces but not newlines.
+    marker = raw.rstrip(' ')  # remove trailing spaces, preserve newlines
+    return marker
 
 
 def tokenizer_marker_diff(tokenizer: object, marker: str) -> dict:
@@ -91,3 +105,28 @@ def tokenizer_marker_diff(tokenizer: object, marker: str) -> dict:
     except Exception:
         result["tokens"] = None
     return result
+
+
+def normalize_marker(marker: str, strip_trailing_newline: bool = False) -> str:
+    """Normalize a marker string for use in probing.
+
+    Args:
+        marker: the raw extracted marker string (may include newlines and spaces)
+        strip_trailing_newline: if True, remove a single trailing newline character
+            from the marker. This is useful for tokenizers that don't include a
+            trailing newline in the tokenization of markers.
+
+    Returns:
+        The normalized marker string.
+    """
+    if marker is None:
+        return marker
+    if strip_trailing_newline:
+        # Remove exactly one trailing newline if present, and also remove
+        # trailing carriage return for windows-style endings.
+        if marker.endswith("\r\n"):
+            return marker[:-2]
+        if marker.endswith("\n") or marker.endswith("\r"):
+            return marker[:-1]
+    # Default: trim only trailing spaces (preserve newlines unless stripped)
+    return marker.rstrip(' ')

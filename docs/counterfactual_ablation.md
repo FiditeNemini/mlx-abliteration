@@ -40,4 +40,6 @@ To use this advanced technique, you need to:
 1.  **Prepare your datasets** in the counterfactual format described above. Ensure both your harmless and harmful datasets have a consistent "thinking" block that ends with a specific, identifiable marker.
 2.  **Use the `--probe-marker` CLI argument** or the "Probe Marker" input field in the GUI to specify the exact string that marks the end of the thinking process (e.g., `</thinking>`).
 
+If your model's marker includes a trailing newline (for example `<|im_start|>assistant\n`) but your tokenizer does not include that trailing newline during tokenization, add the CLI flag `--strip-marker-newline` (or use the corresponding checkbox in the GUI) to remove a single trailing newline/CRLF from the marker before tokenization.
+
 The application will then tokenize this marker, find its position in the model's output, and extract the activation of the token immediately preceding it. This activation will be used to calculate the refusal vector, leading to a more precise and effective ablation.

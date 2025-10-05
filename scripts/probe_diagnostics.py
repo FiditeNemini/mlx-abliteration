@@ -5,7 +5,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 """Probe marker diagnostics helper.
 
 Usage:
-  python scripts/probe_diagnostics.py --model /path/to/model [--probe-marker '</thinking>'] [--probe-debug-full]
+    python scripts/probe_diagnostics.py --model /path/to/model [--probe-marker '</thinking>'] [--strip-marker-newline] [--probe-debug-full]
 
 This script loads the tokenizer for a local MLX model and inspects the
 generated_datasets (harmless/harmful) in the repo to report whether the
@@ -105,6 +105,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True, help="Path to local model folder")
     p.add_argument("--probe-marker", default=None, help="Optional explicit probe marker")
+    p.add_argument("--strip-marker-newline", action="store_true", help="If set, strip a trailing newline from the probe marker before tokenization.")
     p.add_argument("--probe-debug-full", action="store_true", help="Show token strings when possible")
     p.add_argument("--sample-n", type=int, default=3, help="Samples to show per dataset where marker not found")
     p.add_argument("--append-marker", action="store_true", help="Append the probe marker to each prompt before tokenization (simulate marker present in model output)")
