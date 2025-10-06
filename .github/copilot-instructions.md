@@ -198,5 +198,3 @@ Use this checklist when you want to run the full pipeline locally against a smal
 
    - Provide `--probe-marker '</thinking>'` on the CLI.
    - Or add a `tokenizer_config.json` with `chat_template` that the code's `extract_eot_from_chat_template` can parse.
-
-If you'd like, I can (A) add the small example test file for `mlp.up_proj` now, or (B) convert the test shims into a reusable helper under `tests/helpers/` and update tests to import it. Which do you prefer?
