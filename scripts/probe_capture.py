@@ -16,9 +16,34 @@ import json
 from pathlib import Path
 from typing import Optional
 
-import mlx.core as mx
-import mlx_lm
-from datasets import load_dataset
+try:
+    import mlx.core as mx  # type: ignore
+except Exception:
+    print("[probe_capture] mlx runtime not available; exiting gracefully without traceback.")
+    raise SystemExit(0)
+
+import mlx_lm  # type: ignore
+try:
+    from datasets import load_dataset  # type: ignore
+except Exception:
+    # Provide a tiny fallback loader for local jsonl files
+    def load_dataset(name_or_path, data_files=None):  # type: ignore
+        import json as _json
+        from pathlib import Path as _Path
+        p = _Path(data_files or name_or_path)
+        recs = []
+        if p.is_file():
+            with open(p, 'r') as fh:
+                for line in fh:
+                    if line.strip():
+                        recs.append(_json.loads(line))
+        else:
+            for f in sorted(p.glob('*.jsonl')):
+                with open(f, 'r') as fh:
+                    for line in fh:
+                        if line.strip():
+                            recs.append(_json.loads(line))
+        return {'train': recs}
 
 from core.abliteration import ActivationProbeWrapper
 

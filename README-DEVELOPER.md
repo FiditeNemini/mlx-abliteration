@@ -164,3 +164,66 @@ Tell me which of these you'd like next and I will add it.
 ---
 
 Last updated: 2025-10-04
+
+## New features (2025-10-09)
+
+Summary of developer-facing additions
+
+- Adaptive ablation search: added `core/adaptive.py` which implements a
+  multiplicative coarse search for ablation strength, optional fine-grained
+  local grid search, and hooks to use either an alignment-based surrogate
+  metric or a generation-based refusal metric. Use `--adaptive` and related
+  flags in the CLI to exercise this flow.
+
+- Generation-based evaluation: a small evaluation harness was added that
+  runs short generations against candidate ablated models and applies a
+  refusal-detector heuristic to compute `refusal_rate`. This is used by the
+  adaptive search (`--eval-after`, `--eval-prompts`) and by the
+  `scripts/eval_ablated_model.py` script.
+
+- New scripts for layer sweeps and multi-layer combined ablation:
+  - `scripts/sweep_layers_weights.py`: probes the model, computes per-layer
+    mean activation differences, ranks layers by norm, and writes a JSON
+    summary.
+  - `scripts/sweep_topk_multilayer.py`: combines the top-K refusal vectors
+    and runs a sweep of ablation strengths (e.g., 1.0–5.0) across the joint
+    ablation. Results are written to `outputs/<run>/multi_topk_sweep.json`.
+
+Developer usage examples
+
+Run the layer-ranking script (writes `sweep_results.json` under the model run dir):
+
+```bash
+PYTHONPATH=. python scripts/sweep_layers_weights.py --model-dir outputs/auto-adapt-run --topk 10
+```
+
+Run the multi-layer combined sweep for the top-3 ranked layers:
+
+```bash
+PYTHONPATH=. python scripts/sweep_topk_multilayer.py --model-dir outputs/auto-adapt-run --topk 3
+```
+
+Notes on the ablation math and safety
+
+- The ablation routines in `core/abliteration.py` now include
+  orientation-detection logic: when the hidden dimension H (from the
+  refusal vector) appears on the column axis of a 2D weight, the code
+  transposes for computation and transposes back when writing the
+  ablated tensor.
+- For parameters whose shapes cannot be reconciled with H (for example
+  grouped/block shapes), the code will skip ablation for that parameter and
+  emit a warning in the structured logs. This makes multi-layer combined
+  ablation robust for large heterogeneous models while remaining safe.
+
+Testing guidance
+
+- Add unit tests that mock `QuantizedLinear` and example weight shapes to
+  exercise the orientation-detection logic. See `tests/test_up_proj_target.py`
+  for patterns to follow.
+- If you change multi-layer composition logic (how refusal vectors are
+  combined), update `tests/test_ablate_method_and_pca.py` and
+  `tests/test_abliteration_dummy.py` to include combined-vector scenarios.
+
+If you'd like, I can add a small `dev_tools/` script that produces a
+representative set of mocked weight tensors (varied shapes) and a unit test
+that validates ablation runs without network or large-model dependencies.

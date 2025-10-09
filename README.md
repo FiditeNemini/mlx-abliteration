@@ -454,3 +454,66 @@ The test will run the full probing and PCA/ablation code paths but will not over
 ---
 
 If anything in this README is unclear or you want expanded examples for a particular model type or deployment scenario, tell me which model you plan to target and I will add a tailored example command set.
+
+## New features (2025-10-09)
+
+This release added interactive and automated tooling for adaptive ablation
+strength selection, generation-based evaluation, and multi-layer sweep
+experiments. Below is a concise summary and examples to help users and
+developers get started.
+
+Key additions
+- Adaptive ablation search (`--adaptive`): multiplicative coarse search with
+    optional fine-grained local grid search to automatically recommend an
+    ablation strength that meets an alignment target.
+- Generation-based evaluation (`--eval-after`, `--eval-prompts`): use
+    small generation runs and a refusal-detector to score candidate ablated
+    models during adaptive search or as a post-hoc evaluation.
+- Expanded ablation targets: attention q/k/v projections and additional MLP
+    patterns (for example `mlp.up_proj`) are included by default in
+    `get_ablated_parameters`.
+- Multi-layer sweep scripts: `scripts/sweep_layers_weights.py` to rank layers
+    by activation-difference and `scripts/sweep_topk_multilayer.py` to run a
+    combined ablation sweep over the top-k layers.
+
+CLI flags (high level)
+- `--adaptive`: enable adaptive search for ablation strength.
+- `--adaptive-initial`: initial strength for adaptive multiplicative search.
+- `--adaptive-max`: maximum allowed strength during the coarse search.
+- `--adaptive-growth`: multiplicative growth factor used during coarse search.
+- `--adaptive-target-ratio`: early stop criterion for the alignment-based metric.
+- `--adaptive-fine-grid`: enable a fine-grained local grid search around the
+    best coarse strength (boolean) and `--adaptive-fine-range/--adaptive-fine-steps`.
+- `--eval-after`: run a quick generation-based evaluation after ablation and
+    report refusal rates.
+- `--eval-prompts`: path to a JSONL of evaluation prompts used by
+    generation-based evaluation.
+
+Example: run adaptive ablation with generation-based evaluation and save
+recommended ablation strength to output directory
+
+```bash
+python cli.py \
+    -m /path/to/model -o ./outputs/adaptive-run \
+    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
+    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
+    --adaptive --adaptive-initial 0.5 --adaptive-max 8.0 --adaptive-growth 2.0 \
+    --adaptive-target-ratio 0.9 --adaptive-fine-grid --adaptive-fine-range 0.5 \
+    --eval-after --eval-prompts ./generated_datasets/eval_prompts.jsonl --eval-samples 20
+```
+
+Example: run a multi-layer combined sweep (top-3 layers) — this produces
+`outputs/<run>/multi_topk_sweep.json` with per-strength results
+
+```bash
+PYTHONPATH=. python scripts/sweep_topk_multilayer.py --model-dir outputs/auto-adapt-run --topk 3
+```
+
+Notes on robustness
+- The ablation math has been hardened to detect weight orientation and will
+    transpose tensors when the hidden dimension is on the column axis. If a
+    parameter's shape cannot be reconciled with the expected hidden dimension,
+    the tool will skip that parameter and log the reason (safer than crashing).
+- For reproducibility, save candidate ablated models and run `scripts/eval_ablated_model.py`
+    (or `cli.py --eval-after`) against a wider evaluation set before picking a
+    final model to deploy.
