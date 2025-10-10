@@ -568,7 +568,3 @@ pytest -q tests/test_dry_run_real_model.py
 ```
 
 The test will run the full probing and PCA/ablation code paths but will not overwrite your model (the test patches the save routine to avoid destructive writes). Use this to validate the full pipeline on a target model before running irreversible ablations.
-
----
-
-If anything in this README is unclear or you want expanded examples for a particular model type or deployment scenario, tell me which model you plan to target and I will add a tailored example command set.
