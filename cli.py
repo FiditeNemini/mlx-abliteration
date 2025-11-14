@@ -539,7 +539,7 @@ def run_abliteration(args: argparse.Namespace):
                     use_idx = probe_idx if (0 <= probe_idx < arr.shape[1]) else arr.shape[1] - 1
                     vec = arr[0, use_idx, :]
 
-                res.append(_np.array(vec))
+                res.append(_np.asarray(vec))
                 collected += 1
 
             if not res:
