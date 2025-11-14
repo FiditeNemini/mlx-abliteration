@@ -1,38 +1,194 @@
-core/__pycache__/
-*.pyc
-.DS_Store
-.cache/*
-*.code-workspace
+# Byte-compiled / optimized / DLL files
 __pycache__/
-.vscode/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
 .env
 .env.*
-/generated_datasets/*
-/outputs/*
-/out_dry_run/
-
-# Python virtual environments
+.venv
 .venv/
-venv/
 env/
-.env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-# pytest / test caches
-.pytest_cache/
-.cache/pip
+# Spyder project settings
+.spyderproject
+.spyproject
 
-# Editor/project files
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDEs and editors
+.vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.code-workspace
 
-# Static caches and build artifacts
-.mypy_cache/
-pip-wheel-metadata/
-.eggs/
-build/
-dist/
+# OS-specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
-# Coverage
-.coverage
-coverage.xml
+# Project-specific outputs and caches
+/generated_datasets/*
+/outputs/*
+/out_dry_run/
+/out_dummy/
+/dummy_model/
+*.jsonl
+!templates.yaml
+
+# MLX and model artifacts
+*.safetensors
+*.bin
+*.gguf
+*.mlx
+model.safetensors.index.json
+
+# Hugging Face cache
+.cache/
+~/.cache/huggingface/
+
+# Ruff cache
+.ruff_cache/
+
+# Gradio temporary files
+gradio_cached_examples/
+flagged/
+
+# Debug and diagnostic outputs
+debug/
+*.npz
+*.npy
+*.pkl
+*.pickle
+
+# Log files
+*.log
+log.jsonl
+abliteration_log.json
+
+# Temporary files
+tmp/
+temp/
+*.tmp
