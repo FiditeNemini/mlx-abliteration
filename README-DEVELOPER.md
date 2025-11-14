@@ -118,6 +118,8 @@ python cli.py -m ./dummy_model -o ./out_dummy --harmless-dataset ./generated_dat
 
 - `core/utils.py` — utility functions used across the codebase. If you refactor parameter naming schemes, update `get_module_from_key` accordingly.
 
+- **MLX to NumPy conversions**: When converting MLX arrays to NumPy, always use `np.asarray()` rather than `np.array()` to properly handle the buffer protocol and avoid PEP 3118 buffer format mismatches. This is critical in PCA collection paths (`cli.py` and `gui.py`).
+
 ## Extending behavior safely
 
 1) Adding new ablation targets
@@ -152,6 +154,7 @@ If you'd like, I can add short wrappers that produce a `./debug/activations.npz`
 2. If probe marker is not found — enable `--probe-debug` and inspect token ids and a few sample prompts.
 3. If saving fails for sharded models — confirm `model.safetensors.index.json` is present in the source; the save logic relies on the source weight map to determine shard contents.
 4. If tests fail after a refactor — run the failing test with `-q -k <testname>` and run a single-file debug.
+5. If you see `RuntimeError: Item size X for PEP 3118 buffer format string` — this indicates an MLX-to-numpy conversion issue. Use `np.asarray()` instead of `np.array()` to properly handle the buffer protocol conversion from MLX arrays.
 
 ## Suggested follow-ups I can implement
 
