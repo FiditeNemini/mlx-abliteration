@@ -2,6 +2,8 @@
 
 This toolkit provides a suite of tools for performing mechanistic interpretability-driven model surgery on Large Language Models (LLMs) using the Apple MLX framework. It allows for the surgical removal of specific behaviors, such as refusal to answer certain prompts, by modifying the model's weights directly.
 
+[![CI](https://github.com/FiditeNemini/mlx-abliteration/actions/workflows/ci.yml/badge.svg)](https://github.com/FiditeNemini/mlx-abliteration/actions/workflows/ci.yml)
+
 ## Overview
 
 Abliteration is a technique that identifies and neutralizes the "refusal direction" within a model's activation space. This toolkit implements the full abliteration pipeline:
