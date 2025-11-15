@@ -45,7 +45,7 @@ jobs:
         run: flake8 .
 
       - name: Run mypy (type checking)
-        run: mypy . --ignore-missing-imports --allow-untyped-defs
+        run: mypy . --ignore-missing-imports --allow-untyped-defs --no-site-packages
 
       - name: Run tests
         run: pytest -q
