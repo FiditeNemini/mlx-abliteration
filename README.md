@@ -1,27 +1,32 @@
 # MLX Abliteration Toolkit
 
-This toolkit provides a suite of tools for performing mechanistic interpretability-driven model surgery on Large Language Models (LLMs) using the Apple MLX framework. It allows for the surgical removal of specific behaviors, such as refusal to answer certain prompts, by modifying the model's weights directly.
+A comprehensive toolkit for performing mechanistic interpretability-driven model surgery on Large Language Models (LLMs) using the Apple MLX framework. It allows surgical removal of specific behaviors (such as refusal patterns) by modifying model weights directly.
 
 [![CI](https://github.com/FiditeNemini/mlx-abliteration/actions/workflows/ci.yml/badge.svg)](https://github.com/FiditeNemini/mlx-abliteration/actions/workflows/ci.yml)
 
 ## Overview
 
-Abliteration is a technique that identifies and neutralizes the "refusal direction" within a model's activation space. This toolkit implements the full abliteration pipeline:
+Abliteration identifies and neutralizes the "refusal direction" within a model's activation space. The toolkit implements a full pipeline:
 
-1.  **Data Collection**: Gathers activations from a model based on "harmful" and "harmless" prompt datasets.
-2.  **Direction Calculation**: Computes the refusal vector based on the difference in mean activations.
-3.  **Weight Orthogonalization**: Modifies the model's weight matrices to be orthogonal to the refusal direction, effectively disabling the targeted behavior.
+1.  **Data Collection**: Gathers activations from harmful and harmless prompt datasets
+2.  **Direction Calculation**: Computes the refusal vector (or multiple principal components) from mean activation differences
+3.  **Weight Orthogonalization**: Modifies weight matrices to be orthogonal to the refusal direction(s)
+4.  **Adaptive Search** (optional): Automatically finds optimal ablation strength
 
-This toolkit provides both a command-line interface (CLI) for programmatic use and a Gradio web UI for interactive experimentation.
+The toolkit provides:
+- **CLI** (`cli.py`) for automated workflows
+- **Gradio UI** (`gui.py`) for interactive experimentation
+- **Dataset Generator** (`generate_dataset.py`) for creating custom probe datasets
+- **Diagnostic Scripts** for layer analysis and evaluation
 
 ## Installation
 
-It is recommended to use Conda to manage the environment.
+Conda is recommended for environment management.
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository-url>
-    cd abliteration-toolkit
+    git clone https://github.com/FiditeNemini/mlx-abliteration.git
+    cd mlx-abliteration
     ```
 
 2.  **Create the Conda environment:**
@@ -30,492 +35,410 @@ It is recommended to use Conda to manage the environment.
     conda activate abliteration-env
     ```
 
-Alternatively, you can use `pip` with the provided `requirements.txt`:
+    **Or use pip:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Quick Start
+
 ```bash
-pip install -r requirements.txt
+# Generate datasets
+python generate_dataset.py --num-samples 100 --output-dir generated_datasets
+
+# Run abliteration (basic)
+python cli.py \
+    -m mlx-community/Phi-3-mini-4k-instruct-4bit-mlx \
+    -o ./outputs/ablated-phi3 \
+    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
+    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl
+
+# Launch interactive UI
+python gui.py
 ```
 
 ## CLI Usage
 
-The `cli_script.py` provides a powerful interface for running the abliteration process from the command line.
+The `cli.py` script provides a comprehensive command-line interface.
+
+### Basic Usage
 
 ```bash
-python cli_script.py --help
+python cli.py -m <model-path-or-hub-id> -o <output-dir> [options]
 ```
+
+### Key Options
+
+**Model & Data:**
+- `-m, --model`: Local path or Hugging Face Hub ID (required)
+- `-o, --output-dir`: Output directory (required)
+- `-hd, --harmless-dataset`: Harmless dataset path/Hub ID
+- `-ad, --harmful-dataset`: Harmful dataset path/Hub ID
+
+**Probing:**
+- `-l, --layers`: Layers to probe (`all` or comma-separated, e.g., `15,16,17`)
+- `-u, --use-layer`: Layer for refusal vector (default: `-1` = last layer)
+- `--probe-marker`: Token marker for precise probing (e.g., `</thinking>`)
+- `--probe-mode`: Token selection mode:
+  - `follow-token`: Token after marker (default)
+  - `marker-token`: The marker token itself
+  - `last-token`: Always use last token
+  - `thinking-span`: Average tokens after marker
+- `--probe-span`: Number of tokens to average in `thinking-span` mode (default: 1)
+- `--probe-debug`: Enable debug output for tokenization
+
+**Ablation:**
+- `-s, --ablation-strength`: Ablation multiplier (default: 1.0)
+- `--ablate-k`: Number of top PCA components to ablate (default: 1)
+- `--ablate-method`: Method for ablation:
+  - `projection`: Build projection matrix (recommended for multi-component)
+  - `sequential`: Subtract components one-by-one (legacy)
+
+**Adaptive Search:**
+- `--adaptive`: Enable automatic strength search
+- `--adaptive-initial`: Starting strength (default: 0.5)
+- `--adaptive-max`: Maximum strength (default: 8.0)
+- `--adaptive-growth`: Growth factor (default: 1.5)
+- `--adaptive-target-ratio`: Target alignment reduction (default: 0.2 = 80% reduction)
+
+**Evaluation & Debug:**
+- `--eval-after`: Run post-ablation refusal evaluation
+- `--eval-prompts`: Path to evaluation prompts (JSONL)
+- `--dump-dequant`: Write dequantized .npy dumps for debugging
+- `--cache-dir`: Cache directory for downloads (default: `.cache`)
+- `-v, --verbose`: Enable verbose logging
 
 ### Examples
 
-**Run abliteration on a local model:**
+**Basic abliteration with Hugging Face model:**
 ```bash
-python cli_script.py \
-    --model /path/to/local/mlx-model \
-    --output-dir /path/to/save/ablated-model
+python cli.py \
+    -m mlx-community/Phi-3-mini-4k-instruct-4bit-mlx \
+    -o ./outputs/ablated-phi3
 ```
 
-**Run abliteration on a model from the Hugging Face Hub:**
+**Advanced: thinking-span probing with adaptive search:**
 ```bash
-python cli_script.py \
-    --model "mlx-community/phi-3-mini-4k-instruct-4bit-mlx" \
-    --output-dir ./ablated-phi-3
+python cli.py \
+    -m /path/to/local/model \
+    -o ./outputs/adaptive-ablated \
+    --probe-mode thinking-span \
+    --probe-span 3 \
+    --adaptive \
+    --adaptive-initial 0.5 \
+    --adaptive-max 8.0 \
+    --eval-after
 ```
 
-## Gradio UI Usage
-
-For an interactive experience, launch the Gradio web UI.
-
+**Multi-component ablation with projection method:**
 ```bash
-python gradio_ui.py
+python cli.py \
+    -m mlx-community/some-model \
+    -o ./outputs/multi-component \
+    --ablate-k 3 \
+    --ablate-method projection \
+    --ablation-strength 1.5
 ```
 
-This will start a local web server. Open the provided URL in your browser to access the interface. The UI allows you to:
-- Specify model and datasets (from local paths or Hugging Face Hub).
-- Configure advanced parameters like which layers to probe.
-- Monitor the process in real-time via a streaming log.
-- Receive a link to the final abliterated model directory upon completion.
+**Debug tokenization and probing:**
+```bash
+python cli.py \
+    -m /path/to/model \
+    -o ./outputs/debug-run \
+    --probe-marker '</think>' \
+    --probe-debug \
+    --probe-debug-n 5 \
+    --probe-debug-full
+```
 
-## 🔬 Experimental Features
+## Gradio UI
 
-### Counterfactual Probing for "Thinking" Models
+Launch an interactive web interface:
 
-For more advanced models that exhibit chain-of-thought reasoning, standard ablation can be less effective due to "signal contamination" from the thinking process. This toolkit includes an experimental feature for more precise, marker-based activation probing.
+```bash
+python gui.py
+```
 
-This technique is designed to isolate the model's "decision" to refuse from its preceding "thinking" process, resulting in a cleaner and more effective refusal vector.
+The UI provides:
+- Input fields for model and datasets (local paths or Hugging Face Hub IDs)
+- Advanced parameter configuration (layers, probing, ablation settings)
+- Real-time process monitoring with streaming logs
+- Dry-run report viewer with automatic layer recommendations
+- Output path display for the ablated model
 
-**For a detailed explanation of the theory and usage instructions, please see the [Counterfactual Probing Documentation](./docs/counterfactual_ablation.md).**
+All CLI options are available in the UI, organized in tabs for ease of use.
 
-## Troubleshooting
+## Generating Datasets
 
-- **Out of Memory Errors**: The abliteration process, especially activation probing, can be memory-intensive. If you encounter OOM errors, try using a smaller model or running on a machine with more RAM.
-- **Hugging Face Authentication**: To access private models or datasets, you may need to log in to the Hugging Face Hub. Use the `huggingface-cli login` command in your terminal.
-- **Dependency Issues**: Ensure you are using the specified Python version and have installed all packages from the `environment.yml` or `requirements.txt` file.
+The `generate_dataset.py` script creates paired harmful/harmless datasets from YAML templates.
 
-## Generating Datasets for Ablation
+### Basic Usage
 
-This toolkit includes a flexible script, `generate_dataset.py`, to help you create paired datasets for counterfactual ablation. The script uses a YAML file (`templates.yaml`) to define the structure and content of the generated prompts.
+```bash
+python generate_dataset.py \
+    --template-file templates.yaml \
+    --num-samples 200 \
+    --output-dir ./generated_datasets
+```
 
-### The `templates.yaml` File Structure
+### With Probe Markers
 
-The `templates.yaml` file is the heart of the dataset generator. It has two main sections: `concepts` and `templates`.
+```bash
+python generate_dataset.py \
+    --num-samples 200 \
+    --probe-marker '</thinking>' \
+    --append-marker \
+    --output-dir ./generated_datasets
+```
 
-#### 1. The `concepts` Section
+### Template Structure (`templates.yaml`)
 
-The `concepts` section defines the pairs of ideas you want the model to distinguish between. Each concept consists of a harmful behavior and its harmless counterpart.
+The YAML file contains two main sections:
 
-**Structure:**
+#### 1. Concepts
 
-Each item under `concepts` is an object with three keys:
-*   `name`: A descriptive name for the concept (e.g., "Illegal Activities").
-*   `harmful_value`: A string describing the harmful or undesirable action.
-*   `harmless_value`: A string describing the safe or neutral alternative.
-
-**Example:**
+Define harmful/harmless behavior pairs:
 
 ```yaml
 concepts:
   - name: "Unsafe Behavior"
     harmful_value: "shoplift a candy bar"
     harmless_value: "buy a candy bar"
-
+  
   - name: "Misinformation"
-    harmful_value: "spread a false rumor that 'Product X' is dangerously defective"
-    harmless_value: "state the fact that 'Product X' has passed all safety inspections"
-## MLX Abliteration Toolkit — README
-
-This repository implements an end-to-end pipeline for mechanistic, activation-space "abliteration" of behaviors in MLX models. The project provides:
-
-- A command-line interface: `cli.py`
-- An interactive Gradio UI: `gui.py`
-- A dataset generator for paired harmful/harmless prompts: `generate_dataset.py` + `templates.yaml`
-- Core library code under `core/` (probing, vector computation, weight orthogonalization, saving)
-- Tests and helper shims under `tests/` and `helpers/`
-
-This README documents how to use every top-level file and the important core modules, with concrete examples.
-
-## Quick start
-
-1. Clone the repository and enter it:
-
-```bash
-git clone <repo-url>
-cd mlx-abliteration
+    harmful_value: "spread false rumors about Product X"
+    harmless_value: "share verified facts about Product X"
 ```
 
-2. Create an environment (Conda recommended) and install dependencies:
+#### 2. Templates
 
-```bash
-conda env create -f environment.yml
-conda activate abliteration-env
-# or with pip
-pip install -r requirements.txt
+Define prompt templates with `{behavior}` placeholders:
+
+```yaml
+templates:
+  - id: "instruction"
+    prompt: "Write detailed instructions on how to {behavior}."
+  
+  - id: "story"
+    prompt: "Tell me a story about someone who wants to {behavior}."
 ```
 
-3. Run a quick no-op abliteration (uses your local model directory and saves outputs):
+Optional `{marker}` placeholder for thinking markers:
 
-```bash
-# Create a tiny dummy model directory before running (see Developer tips below)
-python cli.py -m ./dummy_model -o ./out_dummy --ablation-strength 0
+```yaml
+templates:
+  - id: "think-instruction"
+    prompt: "Think carefully{marker}, then explain how to {behavior}."
 ```
 
-## Files & how to use them
+The generator creates two JSONL files:
+- `harmful_dataset.jsonl`: Uses `harmful_value` from concepts
+- `harmless_dataset.jsonl`: Uses `harmless_value` from concepts
 
-Below are the important files with usage examples and tips.
+## Advanced Features
 
-### `cli.py` — Command-line pipeline
+### Adaptive Ablation Strength Search
 
-Purpose: run the full abliteration workflow (resolve assets, probe activations, compute refusal vector, orthogonalize weights, save ablated model).
-
-How to run:
-
-```bash
-python cli.py -m <model-path-or-hub-id> -o <output-dir> [options]
-```
-
-Key flags (most common):
-
-- `-m / --model`: local path or Hugging Face Hub ID of the MLX model (required)
-- `-o / --output-dir`: directory where the ablated model will be written (required)
-- `-hd / --harmless-dataset`, `-ad / --harmful-dataset`: dataset local path or Hub id (defaults present)
-- `-l / --layers`: which layers to probe ("all" or comma-separated indices)
-- `-u / --use-layer`: layer index to compute the refusal vector from (negative values allowed, default -1)
-- `-s / --ablation-strength`: multiplier for ablation effect (float, default 1.0)
-- `--probe-marker`: optional string marker to locate the probe token (e.g. `</thinking>`). If omitted, the code attempts to extract a marker from `tokenizer_config.json` or falls back to the last token.
-- `--probe-mode`: `follow-token|marker-token|last-token` — how to choose which token to probe when a marker is found.
-- `--probe-mode`: `follow-token|marker-token|last-token|thinking-span` — how to choose which token(s) to probe when a marker is found. Use `thinking-span` to average a small window of tokens following a marker (see experimental features below).
-- `--ablate-method`: `projection|sequential` — how to remove the identified components from model weights. `projection` (default) builds a projection matrix from the top-k components and removes that subspace in one step; `sequential` subtracts projections component-by-component (legacy behavior). Use `projection` for multi-component ablation (recommended).
-
-#### New probe mode: `thinking-span`
-
-`thinking-span` averages activations across a short contiguous span of tokens immediately following an end-of-thought marker (for example `</think>`). Use this when a model's internal reasoning or the transition token is split across multiple tokenizer tokens. Recommended defaults:
-
-- Probe Marker: `</think>` (auto-detected when present in `tokenizer_config.json`)
-- Probe Mode: `thinking-span`
-- Probe Span: `1` (increase to 2-4 if the post-marker content tokenizes into multiple tokens you wish to average)
-
-`thinking-span` is conservative and is best used when `--probe-debug` shows marker tokens followed by multi-token transitions.
-- `--probe-debug`: emit a few tokenization/probe diagnostics (useful for troubleshooting marker/tokenization mismatches)
-
-Example (full):
+The `--adaptive` flag enables automatic ablation strength selection:
 
 ```bash
 python cli.py \
-    -m mlx-community/phi-3-mini-4k-instruct-4bit-mlx \
-    -o ./outputs/ablated-phi3 \
-    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
-    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
-    --layers all \
-    --use-layer -1 \
-    --ablation-strength 1.0 \
-    --probe-marker '</thinking>' \
-    --probe-mode follow-token
+    -m /path/to/model \
+    -o ./outputs/adaptive-ablated \
+    --adaptive \
+    --adaptive-initial 0.5 \
+    --adaptive-max 8.0 \
+    --adaptive-growth 1.5 \
+    --adaptive-target-ratio 0.2
 ```
 
-Notes:
+The adaptive search:
+1. Measures baseline alignment metric (harmful vs harmless activation difference)
+2. Tries increasing ablation strengths (multiplicative growth)
+3. Stops when alignment is reduced by target percentage (e.g., 80% for ratio=0.2)
+4. Saves the recommended strength in `abliteration_log.json`
 
-- `cli.py` uses `core/asset_resolver.resolve_asset` to accept either a local path or a Hugging Face Hub id. Use `--cache-dir` to control where downloads are stored.
-- If `--ablation-strength 0` you can exercise the full pipeline (probing + save) without changing weights.
+### Multi-Component Ablation (PCA)
 
-### `gui.py` — Gradio interface
-
-Purpose: interactive UI for the same pipeline with streaming logs and an output file link.
-
-How to run:
+Remove multiple principal components instead of just the mean difference:
 
 ```bash
-python gui.py
+python cli.py \
+    -m /path/to/model \
+    -o ./outputs/multi-component \
+    --ablate-k 3 \
+    --ablate-method projection \
+    --pca-sample 512
 ```
 
-The UI fields map directly to CLI options (model path/Hub ID, harmless/harmful datasets, layers, probe marker, ablation strength, etc.). The UI saves outputs under `./outputs/<output_dir>` by default and returns the path to the saved safetensors (or index file for sharded models).
+This computes top-k PCA components from per-example activations and removes their combined subspace.
 
-Use the "Probe Marker" field to paste marker strings or leave empty and rely on `tokenizer_config.json` detection.
+### Thinking-Span Probing
 
-### `generate_dataset.py` & `templates.yaml`
-
-Purpose: generate paired `harmful_dataset.jsonl` and `harmless_dataset.jsonl` for probing.
-
-Basic run (uses `templates.yaml` in repo):
+For models with explicit thinking markers (e.g., `</think>`, `</thinking>`):
 
 ```bash
-python generate_dataset.py
+python cli.py \
+    -m /path/to/model \
+    -o ./outputs/thinking-ablated \
+    --probe-marker '</think>' \
+    --probe-mode thinking-span \
+    --probe-span 3
 ```
 
-Options:
+This averages activations across a small window after the marker, useful when the transition tokenizes into multiple tokens.
 
-- `--template-file`: path to YAML templates (default `templates.yaml`)
-- `--output-dir`: directory to write `harmful_dataset.jsonl` and `harmless_dataset.jsonl`
-- `--num-samples`: number of pairs to generate
-- `--probe-marker`: optional string to insert into templates (supports templates that include a `{marker}` placeholder)
-- `--append-marker`: append the marker to every generated prompt (when used with `--probe-marker`)
+### Diagnostic Scripts
 
-Example:
+**Layer analysis:**
+```bash
+python scripts/run_cli_diag.py \
+    -m /path/to/model \
+    -o ./outputs/diag_out \
+    --probe-marker '</think>'
+```
+
+Outputs `dry_run_suggestions.json` with per-layer discrimination metrics.
+
+**Multi-layer sweep:**
+```bash
+PYTHONPATH=. python scripts/sweep_topk_multilayer.py \
+    --model-dir /path/to/model \
+    --topk 3 \
+    --output-dir ./outputs/sweep_results
+```
+
+Tests combined ablation across top-k discriminative layers.
+
+**Evaluation:**
+```bash
+python scripts/eval_ablated_model.py \
+    --model-dir ./outputs/ablated-model \
+    --prompts ./eval_prompts.jsonl
+```
+
+### Selective Dequantized Dumps (Debugging)
+
+For debugging quantized models, enable selective dequantized dumps:
 
 ```bash
-python generate_dataset.py --num-samples 200 --output-dir ./generated_datasets --probe-marker '</thinking>' --append-marker
+python cli.py \
+    -m /path/to/model \
+    -o ./outputs/ablated-with-dumps \
+    --dump-dequant
 ```
 
-`templates.yaml` structure (summary): contains `concepts` (with `name`, `harmful_value`, `harmless_value`) and `templates` (each with `id` and `prompt` containing `{behavior}` — optionally `{marker}`). See the shipped `templates.yaml` for examples.
+This writes `.npy` files to `<output_dir>/dequant_dumps/` for only the tensors that changed during ablation, making it easy to inspect actual float-level differences.
 
-### `core/abliteration.py` — core algorithm
+## Troubleshooting
 
-Main functions & classes:
+**Out of Memory Errors:**
+- Use a smaller model for testing
+- Reduce dataset size or number of probed layers
+- Lower `--pca-sample` value for multi-component ablation
 
-- `ActivationProbeWrapper(model)`: lightweight wrapper that runs a forward pass and captures hidden states per-layer. Use its call signature to get logits and a dict of captured activations.
-- `calculate_refusal_direction(harmful_mean, harmless_mean)`: returns the difference vector used as the refusal direction.
-- `get_ablated_parameters(model, refusal_vector, target_modules=None, ablation_strength=1.0)`: returns an updated parameter tree where specified weight matrices have been orthogonalized to the refusal vector. It handles both standard 2D weights and quantized linear layers (`QuantizedLinear`) by dequantize → orthogonalize → re-quantize.
-- `save_ablated_model(output_dir, model, tokenizer, config, abliteration_log, source_model_path)`: serializes ablated weights, preserves sharding (reads `model.safetensors.index.json` if present), copies ancillary files, and writes an `abliteration_log.json`.
+**Probe Marker Not Found:**
+- Use `--probe-debug` to inspect tokenization
+- Verify marker exists in your prompts
+- Check if marker is split across multiple tokens
+- Consider using `--probe-mode thinking-span` with appropriate `--probe-span`
 
-Developer notes:
-
-- `get_ablated_parameters` accepts `target_modules` (defaults to `['self_attn.o_proj','mlp.down_proj','mlp.c_proj']`) and a float `ablation_strength`.
-- The code writes careful diagnostic logs and performs orthogonality checks for each modified weight.
-
-### `core/asset_resolver.py`
-
-Single helper `resolve_asset(path_or_id, asset_type, local_cache_dir)`:
-
-- If `path_or_id` exists locally, it returns the resolved path.
-- Otherwise it calls `huggingface_hub.snapshot_download` (repo_type derived from `asset_type`, e.g., `models` → `model`).
-
-Use `--cache-dir` in CLI or set `.cache` for GUI to control local cache location.
-
-### `core/utils.py`
-
-Useful helpers:
-
-- `get_module_from_key(model, key)`: map a flattened parameter key (e.g. `model.layers.0.mlp.down_proj.weight`) to the owning module object.
-- `extract_eot_from_chat_template(template_str)`: heuristic to extract a marker (e.g. `</think>`) from a Jinja-style chat template string stored in `tokenizer_config.json`.
-- `tokenizer_marker_diff(tokenizer, marker)`: small diagnostic that returns token ids and token strings (if supported) for a `marker` string.
-
-### `core/logging_config.py`
-
-This repo uses structured JSON logging for CLI and GUI. The CLI calls `setup_structured_logging(name, level)` at startup. Logs are intended to be written to a default location (see `logging_config.py`) — use these logs when diagnosing failures or reviewing pipeline telemetry.
-
-### `scripts/` and `tests/`
-
-- `scripts/probe_capture.py`, `scripts/probe_diagnostics.py`, `scripts/run_cli_diag.py` are helper scripts used during development to capture/inspect probing behavior and reproduce CLI runs.
-- `tests/` contains unit tests and small integration tests. Run tests with `pytest`.
-
-### `scripts/run_cli_diag.py` — safe diagnostic dry-run
-
-This small helper runs the CLI in a diagnostic (dry-run) mode and writes JSON/CSV suggestions for which layers look most discriminative. Important: pass the model path or Hub id on the command line rather than editing the script to avoid leaking sensitive local paths.
-
-Examples:
-
+**Hugging Face Authentication:**
 ```bash
-# Run against a local model directory (recommended to avoid embedding paths in the repo)
-python scripts/run_cli_diag.py -m /path/to/local/model -o ./outputs/diag_out
-
-# Run against a Hugging Face Hub id
-python scripts/run_cli_diag.py -m "org/model-id" -o ./outputs/diag_out --probe-marker "</think>"
+huggingface-cli login
 ```
 
-The script will call `cli.run_abliteration` with `return_means=True`, compute per-layer diff norms, and write `dry_run_suggestions.json` and `dry_run_layer_stats.csv` into the output directory.
+**Missing Dependencies:**
+Ensure all packages from `environment.yml` or `requirements.txt` are installed.
 
-Run tests (recommended):
+**Unexpected Results:**
+- Start with `--ablation-strength 0` to test pipeline without modification
+- Use `--eval-after` to evaluate refusal behavior
+- Try `--adaptive` to automatically find optimal strength
+- Check `abliteration_log.json` for diagnostic information
+
+## Output Files
+
+After running abliteration, the output directory contains:
+
+- `model.safetensors` or `model.safetensors.index.json` (sharded models)
+- `config.json`: Model configuration
+- `tokenizer.json`, `tokenizer_config.json`: Tokenizer files
+- `abliteration_log.json`: Pipeline metadata and settings
+- `dequant_dumps/` (if `--dump-dequant` used): Debug dumps
+- `post_ablation_evaluation.json` (if `--eval-after` used): Evaluation results
+
+Structured logs are written to `~/.mlx-llm/abliteration-toolkit-cli/log.jsonl` (CLI) or the GUI equivalent.
+
+## Testing
+
+Run the test suite:
 
 ```bash
 pytest -q
 ```
 
-Run a single test for quick verification:
-
+Run specific tests:
 ```bash
-pytest tests/test_abliteration_dummy.py::test_get_ablated_parameters -q
+pytest tests/test_abliteration_dummy.py -v
 ```
 
-## Developer & debugging tips
-
-- Quick no-op smoke test: create a `dummy_model/` with a minimal `config.json`, optional `tokenizer_config.json`, and an (empty) `model.safetensors` file. Then run `python cli.py -m ./dummy_model -o ./out_dummy --ablation-strength 0` to go through the flows without changing weights.
-
-- If using probe markers, verify tokenization using `--probe-debug` (CLI) or `Probe Debug` (GUI). If a marker is not found, the tool will fallback to the last token and emit a diagnostic showing a few sample prompts.
-
-- For models on Hugging Face Hub, call `huggingface-cli login` if they are private.
-
-- If you modify `core/abliteration.py` or probing code, run the small unit tests first before trying a large model run.
-
-## Common failure modes
-
-- Missing `config.json` in model directory: the CLI/GUI will raise FileNotFoundError. Ensure `config.json` exists next to `model.safetensors` or the index file.
-- Probe marker never found: the code falls back to last-token probing and prints a concise diagnostic (use `--probe-debug` to inspect tokenization).
-- OOM during probing: reduce dataset size, probe fewer layers, or run against a smaller model.
-
-## Where outputs and logs go
-
-- Abliterated models are written to the `--output-dir` you provide (CLI) or `outputs/<name>` (GUI). For sharded models the tool preserves shard filenames and writes `model.safetensors.index.json`.
-- A JSON `abliteration_log.json` is written into the output directory describing inputs and the vector norm.
-- Structured logs are also written by the CLI/GUI (see `core/logging_config.py` for the configured path).
-
-## Contributing / Next steps
-
-- Add new `target_modules` patterns by updating the default list in `get_ablated_parameters` and add unit tests in `tests/` to cover newly-targeted parameter names.
-- Add support for additional quantized layer types by following the `QuantizedLinear` branch in `get_ablated_parameters`.
-
-If you'd like, I can also:
-
-- Add a short `README-DEVELOPER.md` with the dummy-model creation commands and a minimal test harness.
-- Add example `Makefile` or `tasks.json` entries to automate common flows (run CLI, run GUI, generate dataset, run tests).
-
-## Minimal example commands (copyable)
-
+Dry-run test with a real model:
 ```bash
-# Create a dummy model for quick smoke test
-mkdir -p dummy_model
-cat > dummy_model/config.json <<'JSON'
-{"num_hidden_layers": 1, "hidden_size": 8}
-JSON
-touch dummy_model/model.safetensors
-
-# Generate data (100 samples)
-python generate_dataset.py --num-samples 100 --output-dir generated_datasets
-
-# Run CLI as a no-op (ablation_strength=0)
-python cli.py -m ./dummy_model -o ./out_dummy --harmless-dataset ./generated_datasets/harmless_dataset.jsonl --harmful-dataset ./generated_datasets/harmful_dataset.jsonl --ablation-strength 0
-
-# Launch the Gradio GUI
-python gui.py
-```
-
-## Recommended ablation command (thinking-span + projection)
-
-For models that use an explicit thinking or internal monologue marker (e.g. `</think>`), a good starting CLI is to probe a small span after the marker and remove the top component via projection:
-
-```bash
-python cli.py \
-    -m /path/to/your/model \
-    -o ./outputs/ablated-model \
-    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
-    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
-    --probe-mode thinking-span \
-    --probe-span 3 \
-    --ablate-k 1 \
-    --ablate-method projection \
-    --ablation-strength 1.0
-```
-
-Start with `--ablation-strength 0` to run a no-op save first (verifies probing, vector computation, and serialization):
-
-```bash
-python cli.py -m /path/to/your/model -o ./out_dummy --ablation-strength 0 --probe-mode thinking-span --probe-span 3 --ablate-method projection
-
-## Selective dequantized dumps (debugging)
-
-When diagnosing whether an ablation actually changed model weights (especially
-for quantized/sharded models), it's easy to be misled by packed integer shard
-differences. The toolkit includes an optional selective dequantized dump that
-writes dequantized float arrays for only the tensors that changed numerically
-during ablation. This makes it straightforward to inspect and compare actual
-float-level differences.
-
-How it works
-- The feature reads the source model's safetensors (via the index if present)
-    and compares each weight tensor to the ablated version.
-- Only tensors whose numeric difference norm is non-zero are written.
-- For quantized layers (handled for `QuantizedLinear`), the tool will
-    dequantize the ablated packed weights before writing the .npy dump.
-
-Where dumps are written
-- Dumps are written to: `<output_dir>/dequant_dumps/`
-- Files are named by replacing `.` in the parameter key with `_` and adding
-    the `.npy` extension (for example `model_layers_0_mlp_down_proj_weight.npy`).
-
-CLI example
-
-```bash
-# Run abliteration and write selective dequantized dumps for changed tensors
-python cli.py -m /path/to/your/model -o ./outputs/ablated-with-dumps --dump-dequant
-```
-
-GUI example
-
-- Launch the Gradio UI: `python gui.py`
-- In Advanced Parameters, check the box labeled "Dump Dequantized .npy" and run
-    the pipeline as usual. When complete, open the returned output directory and
-    inspect `dequant_dumps/`.
-
-Notes and caveats
-- Dumps are intended for debugging and verification. They can be large for
-    large models; enable only when needed.
-- The selective logic avoids creating a dump for tensors that did not change,
-    reducing disk usage compared to a full dump of all ablated tensors.
-- The feature is defensive: any failures while reading source tensors or writing
-    dumps are logged but do not abort the save process.
-
-```
-
-Dry-run tests
----------------
-There is an optional pytest that will run a dry-run of the CLI against a real, small local model. It is skipped by default; to enable it set the `REAL_MODEL_DIR` environment variable to the model directory and run pytest. Example:
-
-```bash
-# set to a local small model dir (must contain config.json and tokenizer_config.json)
 export REAL_MODEL_DIR=/path/to/small-model
-pytest -q tests/test_dry_run_real_model.py
+pytest tests/test_dry_run_real_model.py -v
 ```
 
-The test will run the full probing and PCA/ablation code paths but will not overwrite your model (the test patches the save routine to avoid destructive writes). Use this to validate the full pipeline on a target model before running irreversible ablations.
+## Project Structure
 
----
-
-If anything in this README is unclear or you want expanded examples for a particular model type or deployment scenario, tell me which model you plan to target and I will add a tailored example command set.
-
-## New features (2025-10-09)
-
-This release added interactive and automated tooling for adaptive ablation
-strength selection, generation-based evaluation, and multi-layer sweep
-experiments. Below is a concise summary and examples to help users and
-developers get started.
-
-Key additions
-- Adaptive ablation search (`--adaptive`): multiplicative coarse search with
-    optional fine-grained local grid search to automatically recommend an
-    ablation strength that meets an alignment target.
-- Generation-based evaluation (`--eval-after`, `--eval-prompts`): use
-    small generation runs and a refusal-detector to score candidate ablated
-    models during adaptive search or as a post-hoc evaluation.
-- Expanded ablation targets: attention q/k/v projections and additional MLP
-    patterns (for example `mlp.up_proj`) are included by default in
-    `get_ablated_parameters`.
-- Multi-layer sweep scripts: `scripts/sweep_layers_weights.py` to rank layers
-    by activation-difference and `scripts/sweep_topk_multilayer.py` to run a
-    combined ablation sweep over the top-k layers.
-
-CLI flags (high level)
-- `--adaptive`: enable adaptive search for ablation strength.
-- `--adaptive-initial`: initial strength for adaptive multiplicative search.
-- `--adaptive-max`: maximum allowed strength during the coarse search.
-- `--adaptive-growth`: multiplicative growth factor used during coarse search.
-- `--adaptive-target-ratio`: early stop criterion for the alignment-based metric.
-- `--adaptive-fine-grid`: enable a fine-grained local grid search around the
-    best coarse strength (boolean) and `--adaptive-fine-range/--adaptive-fine-steps`.
-- `--eval-after`: run a quick generation-based evaluation after ablation and
-    report refusal rates.
-- `--eval-prompts`: path to a JSONL of evaluation prompts used by
-    generation-based evaluation.
-
-Example: run adaptive ablation with generation-based evaluation and save
-recommended ablation strength to output directory
-
-```bash
-python cli.py \
-    -m /path/to/model -o ./outputs/adaptive-run \
-    --harmless-dataset ./generated_datasets/harmless_dataset.jsonl \
-    --harmful-dataset ./generated_datasets/harmful_dataset.jsonl \
-    --adaptive --adaptive-initial 0.5 --adaptive-max 8.0 --adaptive-growth 2.0 \
-    --adaptive-target-ratio 0.9 --adaptive-fine-grid --adaptive-fine-range 0.5 \
-    --eval-after --eval-prompts ./generated_datasets/eval_prompts.jsonl --eval-samples 20
+```
+mlx-abliteration/
+├── cli.py                    # Main CLI interface
+├── gui.py                    # Gradio web UI
+├── generate_dataset.py       # Dataset generator
+├── templates.yaml            # Dataset templates
+├── core/                     # Core library
+│   ├── abliteration.py      # Probing and orthogonalization
+│   ├── adaptive.py          # Adaptive strength search
+│   ├── asset_resolver.py    # HF Hub/local asset resolution
+│   ├── utils.py             # Helper functions
+│   └── logging_config.py    # Structured logging
+├── scripts/                  # Diagnostic and analysis tools
+│   ├── run_cli_diag.py      # Layer analysis
+│   ├── eval_ablated_model.py
+│   ├── sweep_topk_multilayer.py
+│   └── ...
+└── tests/                    # Unit and integration tests
 ```
 
-Example: run a multi-layer combined sweep (top-3 layers) — this produces
-`outputs/<run>/multi_topk_sweep.json` with per-strength results
+## Contributing
 
-```bash
-PYTHONPATH=. python scripts/sweep_topk_multilayer.py --model-dir outputs/auto-adapt-run --topk 3
+Contributions are welcome! Key areas:
+
+- Additional ablation targets (update `target_modules` in `core/abliteration.py`)
+- Support for new quantized layer types
+- Improved evaluation metrics
+- Additional diagnostic scripts
+
+See `README-DEVELOPER.md` for detailed development guidelines.
+
+## Citation
+
+If you use this toolkit in your research, please cite:
+
+```bibtex
+@software{mlx_abliteration_toolkit,
+  title = {MLX Abliteration Toolkit},
+  author = {FiditeNemini},
+  year = {2024},
+  url = {https://github.com/FiditeNemini/mlx-abliteration}
+}
 ```
 
-Notes on robustness
-- The ablation math has been hardened to detect weight orientation and will
-    transpose tensors when the hidden dimension is on the column axis. If a
-    parameter's shape cannot be reconciled with the expected hidden dimension,
-    the tool will skip that parameter and log the reason (safer than crashing).
-- For reproducibility, save candidate ablated models and run `scripts/eval_ablated_model.py`
-    (or `cli.py --eval-after`) against a wider evaluation set before picking a
-    final model to deploy.
+## License
+
+See the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+This toolkit builds on concepts from mechanistic interpretability research and the MLX framework by Apple. Special thanks to the open-source AI community for their contributions to understanding and improving language models.
