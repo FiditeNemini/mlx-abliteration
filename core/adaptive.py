@@ -45,7 +45,6 @@ import mlx.core as mx
 
 from .abliteration import get_ablated_parameters, ActivationProbeWrapper
 from .abliteration import evaluate_refusal_behavior
-from .utils import tokenizer_marker_diff
 
 logger = logging.getLogger(__name__)
 

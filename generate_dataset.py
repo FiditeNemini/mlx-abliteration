@@ -4,7 +4,7 @@ import logging
 import random
 from pathlib import Path
 
-import yaml
+import yaml  # type: ignore
 from tqdm import tqdm
 from core.utils import extract_eot_from_chat_template
 try:

@@ -80,14 +80,14 @@ def tokenizer_marker_diff(tokenizer: object, marker: str) -> dict:
     if marker is None:
         return result
     try:
-        ids = tokenizer.encode(marker, add_special_tokens=False)
-        result["ids"] = list(ids) if hasattr(ids, '__iter__') else [ids]
+        ids = tokenizer.encode(marker, add_special_tokens=False)  # type: ignore
+        result["ids"] = list(ids) if hasattr(ids, '__iter__') else [ids]  # type: ignore
     except Exception:
         result["ids"] = None
     try:
         if hasattr(tokenizer, "convert_ids_to_tokens") and result["ids"] is not None:
-            toks = tokenizer.convert_ids_to_tokens(result["ids"])
-            result["tokens"] = list(toks)
+            toks = tokenizer.convert_ids_to_tokens(result["ids"])  # type: ignore
+            result["tokens"] = list(toks)  # type: ignore
     except Exception:
         result["tokens"] = None
     return result

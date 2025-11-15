@@ -508,7 +508,6 @@ def run_abliteration(args: argparse.Namespace):
                 probe_idx_list = None
                 if marker_list:
                     token_list = tokens.tolist()
-                    found = False
                     for i in range(len(token_list) - len(marker_list), -1, -1):
                         if token_list[i:i + len(marker_list)] == marker_list:
                             if args.probe_mode == "follow-token":
@@ -525,7 +524,6 @@ def run_abliteration(args: argparse.Namespace):
                                     probe_idx = i + len(marker_list) - 1
                             elif args.probe_mode == "last-token":
                                 probe_idx = len(token_list) - 1
-                            found = True
                             break
 
                 # Extract vector according to chosen indices
@@ -558,8 +556,6 @@ def run_abliteration(args: argparse.Namespace):
         harmless_centered = harmless_mat - harmless_mat_mean
         harmless_u, harmless_s, harmless_vt = _np.linalg.svd(harmless_centered, full_matrices=False)
 
-        harmless_components = harmless_vt[: args.ablate_k]
-
         # Strategy: use the top-k components from harmful set
         pc_vecs = _np.array(harm_components)
         import mlx.core as _mx
@@ -589,7 +585,7 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Orthogonalizing weights and updating model", extra={"extra_info": {"component": "cli", "event": "orthogonalization_start"}})
     adaptive_result = None
     if getattr(args, "adaptive", False):
-        from core.adaptive import adaptive_search_ablation_strength, AdaptiveAblationResult
+        from core.adaptive import adaptive_search_ablation_strength
         logging.info(
             "Starting adaptive ablation strength search",
             extra={
