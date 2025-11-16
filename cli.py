@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     abl_group.add_argument("--probe-span", type=int, default=1, help="Number of tokens to average after the probe marker when using 'thinking-span' probe mode. Defaults to 1 (single token).")
     abl_group.add_argument("--ablate-k", type=int, default=1, help="Number of principal components to ablate (1 = single vector).")
     abl_group.add_argument("--ablate-method", type=str, default="projection", choices=["projection", "sequential"], help="Method used to ablate components: 'projection' builds a projection matrix and removes the subspace in one step; 'sequential' subtracts projections component-by-component.")
+    abl_group.add_argument("--refusal-dir-method", type=str, default="difference", choices=["difference", "projected"], help="Method to calculate refusal direction: 'difference' uses simple harmful-harmless difference; 'projected' removes harmless component from the refusal direction.")
     abl_group.add_argument("--pca-sample", type=int, default=512, help="Maximum number of per-example activations to collect for PCA when --ablate-k > 1.")
     abl_group.add_argument("--probe-debug", action="store_true", help="Enable probe debug output (dump tokenized prompts for first N examples).")
     abl_group.add_argument("--probe-debug-n", type=int, default=3, help="Number of sample prompts to dump when --probe-debug is set.")
@@ -564,7 +565,8 @@ def run_abliteration(args: argparse.Namespace):
     else:
         refusal_vector = calculate_refusal_direction(
             harmful_activations[use_layer_idx],
-            harmless_activations[use_layer_idx]
+            harmless_activations[use_layer_idx],
+            method=args.refusal_dir_method
         )
     # Compute a safe float norm for logging (handles numpy floats or mx arrays)
     try:

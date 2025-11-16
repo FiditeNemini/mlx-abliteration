@@ -130,27 +130,52 @@ class ActivationProbeWrapper(nn.Module):
         return logits, captured_activations
 
 
-def calculate_refusal_direction(mean_harmful_activations: mx.array, mean_harmless_activations: mx.array) -> mx.array:
+def calculate_refusal_direction(mean_harmful_activations: mx.array, mean_harmless_activations: mx.array, method: str = "difference") -> mx.array:
     """Calculates the refusal direction vector.
 
-    The refusal direction is the difference between the mean activations of
-    harmful and harmless prompts.
+    The refusal direction can be calculated using two methods:
+    - 'difference': Simple difference (harmful_mean - harmless_mean)
+    - 'projected': Difference with harmless component projected out
+      (refusal_dir - projection of refusal_dir onto normalized harmless_mean)
 
     Args:
         mean_harmful_activations (mx.array): The mean activation vector for harmful prompts.
         mean_harmless_activations (mx.array): The mean activation vector for harmless prompts.
+        method (str): Method to calculate refusal direction. Either 'difference' or 'projected'.
+            Defaults to 'difference'.
 
     Returns:
         mx.array: The calculated refusal direction vector.
 
     Raises:
-        ValueError: If either of the input activation vectors is None.
+        ValueError: If either of the input activation vectors is None or if method is invalid.
     """
     if mean_harmful_activations is None or mean_harmless_activations is None:
         raise ValueError("Mean activation vectors cannot be None.")
+    
+    if method not in ["difference", "projected"]:
+        raise ValueError(f"Invalid method '{method}'. Must be 'difference' or 'projected'.")
+    
+    # Calculate the base refusal direction
     refusal_dir = mean_harmful_activations - mean_harmless_activations
+    
+    if method == "projected":
+        # Normalize the harmless mean
+        harmless_norm = mx.linalg.norm(mean_harmless_activations)
+        if harmless_norm > 1e-9:
+            harmless_normalized = mean_harmless_activations / harmless_norm
+            # Project refusal_dir onto harmless_normalized
+            projection_scalar = mx.sum(refusal_dir * harmless_normalized)
+            # Subtract the projection to get refined refusal direction
+            refusal_dir = refusal_dir - projection_scalar * harmless_normalized
+            logger.info(f"Applied projected method: projection_scalar={projection_scalar.item():.4f}", 
+                       extra={"extra_info": {"event": "projected_refusal_calculation", "actual_output": {"projection_scalar": float(projection_scalar.item())}}})
+        else:
+            logger.warning("Harmless mean norm too small for projection, falling back to difference method")
+    
     norm = mx.linalg.norm(refusal_dir).item()
-    logger.info(f"Calculated refusal direction vector with norm {norm:.4f}", extra={"extra_info": {"event": "refusal_direction_calculated", "actual_output": {"norm": norm}}})
+    logger.info(f"Calculated refusal direction vector (method={method}) with norm {norm:.4f}", 
+               extra={"extra_info": {"event": "refusal_direction_calculated", "actual_output": {"norm": norm, "method": method}}})
     return refusal_dir
 
 
