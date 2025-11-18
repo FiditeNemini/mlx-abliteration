@@ -231,6 +231,7 @@ def run_abliteration_stream(
     probe_debug_full: bool = False,
     ablate_k: int = 1,
     ablate_method: str = "projection",
+    refusal_dir_method: str = "difference",
     pca_sample: int = 512,
     cache_dir: str = ".cache",
     verbose: bool = False,
@@ -466,7 +467,9 @@ def run_abliteration_stream(
             refusal_vector = _mx.array(pc_vecs)
         else:
             refusal_vector = calculate_refusal_direction(
-                harmful_mean_activations[actual_use_layer], harmless_mean_activations[actual_use_layer]
+                harmful_mean_activations[actual_use_layer], 
+                harmless_mean_activations[actual_use_layer],
+                method=refusal_dir_method
             )
         yield log_and_yield(f"Refusal vector computed from layer {actual_use_layer}.", {"event": "vector_computation_end", "inputs": {"use_layer": actual_use_layer}, "actual_output": {"refusal_vector_norm": float(mx.linalg.norm(refusal_vector).item())}}), None
 
@@ -578,6 +581,7 @@ def create_ui() -> gr.Blocks:
                         gr.Markdown("---")
                         ablate_k_input = gr.Number(label="Ablate k (top components)", value=1, precision=0, info="Number of top PCA components to ablate. 1 = single vector.")
                         ablate_method_input = gr.Dropdown(label="Ablation Method", choices=["projection", "sequential"], value="projection", info="Method used to ablate components.")
+                        refusal_dir_method_input = gr.Dropdown(label="Refusal Direction Method", choices=["difference", "projected"], value="difference", info="Method to calculate refusal direction: 'difference' = simple harmful-harmless; 'projected' = remove harmless component.")
                         pca_sample_input = gr.Number(label="PCA Sample", value=512, precision=0, info="Max per-example samples to collect for PCA when ablate-k > 1")
                         cache_dir_input = gr.Textbox(label="Cache Directory", value=".cache", info="Directory used for downloads and caching.")
                         verbose_checkbox = gr.Checkbox(label="Verbose Logging", value=False, info="Enable verbose (debug) logging for the GUI process.")
@@ -641,6 +645,7 @@ def create_ui() -> gr.Blocks:
             probe_debug_full_checkbox,
             ablate_k_input,
             ablate_method_input,
+            refusal_dir_method_input,
             pca_sample_input,
             cache_dir_input,
             verbose_checkbox,
