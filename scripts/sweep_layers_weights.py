@@ -192,11 +192,11 @@ def main():
             print(f"Layer {layer_idx}  strength {s}: refusal_rate={refusal_rate}")
             results["trials"][layer_key]["strengths"].append({"strength": float(s), "refusal_rate": refusal_rate, "total": int(eval_res.get("total",0)), "refused": int(eval_res.get("refused",0))})
 
-            # Track best configuration (highest refusal rate, then lowest strength)
+            # Track best configuration (lowest refusal rate, then lowest strength)
             if best_config is None:
                 best_config = {"layer": layer_idx, "strength": s, "refusal_rate": refusal_rate}
             else:
-                if refusal_rate > best_config["refusal_rate"]:
+                if refusal_rate < best_config["refusal_rate"]:
                     best_config = {"layer": layer_idx, "strength": s, "refusal_rate": refusal_rate}
                 elif refusal_rate == best_config["refusal_rate"]:
                     # Tie-breaker: prefer lower strength
