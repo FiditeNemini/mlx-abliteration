@@ -8,6 +8,6 @@
 
 ## Enhancements
 
-- [ ] **Robust Model Structure Handling**: `ActivationProbeWrapper` assumes specific model attributes (`model.layers` or `model.model.layers`). It should be made more robust to handle different model architectures or provide clearer error messages.
-- [ ] **Refactor `gui.py` to use shared logic**: After refactoring `get_mean_activations`, update `gui.py` to use the shared function. (Partially done with `find_probe_indices`, but `get_mean_activations_from_dataset` still exists).
+- [x] **Robust Model Structure Handling**: `ActivationProbeWrapper` assumes specific model attributes (`model.layers` or `model.model.layers`). It should be made more robust to handle different model architectures or provide clearer error messages.
+- [x] **Refactor `gui.py` to use shared logic**: After refactoring `get_mean_activations`, update `gui.py` to use the shared function. (Partially done with `find_probe_indices`, but `get_mean_activations_from_dataset` still exists).
 - [ ] **Add Unit Tests for Adaptive Ablation**: `core/adaptive.py` logic is complex and should have dedicated unit tests.

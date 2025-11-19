@@ -41,6 +41,7 @@ from core.abliteration import (
     calculate_refusal_direction,
     get_ablated_parameters,
     save_ablated_model,
+    get_mean_activations,
 )
 from core.logging_config import setup_structured_logging
 from core.utils import extract_eot_from_chat_template, tokenizer_marker_diff, find_probe_indices
@@ -121,182 +122,6 @@ def parse_layers(layers_str: str, num_model_layers: int) -> List[int]:
         return ordered
     except ValueError as e:
         raise ValueError(f"Invalid format for --layers: {e}") from e
-
-def get_mean_activations(
-    dataset,
-    wrapper: ActivationProbeWrapper,
-    tokenizer: Any,
-    layers_to_probe: List[int],
-    config: Dict,
-    desc: str,
-    probe_marker: Optional[str] = None,
-    probe_debug: bool = False,
-    probe_debug_n: int = 3,
-    probe_debug_full: bool = False,
-    probe_mode: str = "follow-token",
-    probe_span: int = 1,
-) -> Dict[int, mx.array]:
-    """Computes mean activations for a given dataset using Welford's algorithm.
-
-    If a `probe_marker` is provided, it finds the marker in the tokenized
-    prompt and uses the activation of the token immediately following it.
-    Otherwise, it defaults to using the activation of the last token.
-
-    Args:
-        dataset: The dataset to process.
-        wrapper (ActivationProbeWrapper): The model wrapper for probing.
-        tokenizer (Any): The tokenizer.
-        layers_to_probe (List[int]): A list of layer indices to probe.
-        config (Dict): The model's configuration dictionary.
-        desc (str): A description for the progress bar.
-        probe_marker (Optional[str]): A string marker to find for probing.
-
-    Returns:
-        Dict[int, mx.array]: A dictionary mapping layer indices to mean activations.
-    """
-    hidden_size = config["hidden_size"]
-    mean_activations = {layer: mx.zeros(hidden_size) for layer in layers_to_probe}
-    counts = {layer: 0 for layer in layers_to_probe}
-    max_seq_len = config.get("max_position_embeddings", 4096)
-
-    if probe_marker and probe_marker.strip():
-        marker_tokens = mx.array(tokenizer.encode(probe_marker, add_special_tokens=False))
-    else:
-        marker_tokens = None
-
-    # Track whether the marker was ever found in the dataset to avoid noisy per-item warnings
-    marker_found_any = False
-    # collect up to probe_debug_n sample prompts where marker wasn't found for diagnostics
-    sample_not_found_examples: list[tuple[str, list]] = []
-    # collect up to probe_debug_n tokenized samples to dump when probe_debug enabled
-    debug_tokenized_samples: list[tuple[str, list]] = []
-
-    for item in tqdm(dataset, desc=desc):
-        prompt = item.get("prompt") or item.get("text")
-        
-        # Handle chat-formatted datasets with "messages" key
-        if not prompt and "messages" in item:
-            # Extract user message content from messages list
-            messages = item["messages"]
-            if isinstance(messages, list):
-                for msg in messages:
-                    if isinstance(msg, dict) and msg.get("role") == "user":
-                        prompt = msg.get("content")
-                        break
-        
-        if not prompt:
-            tqdm.write("Skipping empty prompt.")
-            continue
-
-        tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
-        if len(tokens) > max_seq_len:
-            tokens = tokens[:max_seq_len]
-
-        _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
-
-        token_list = tokens.tolist()
-        marker_list = marker_tokens.tolist() if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0 else None
-        
-        indices, found = find_probe_indices(token_list, marker_list, probe_mode, probe_span)
-        
-        probe_idx = -1
-        probe_idx_list = None
-        
-        if isinstance(indices, list):
-            probe_idx_list = indices
-        else:
-            probe_idx = indices
-
-        if found:
-            marker_found_any = True
-        elif marker_list:
-            # store a small sample for diagnostics (prompt, tokens)
-            if len(sample_not_found_examples) < probe_debug_n:
-                try:
-                    sample_not_found_examples.append((prompt, token_list))
-                except Exception:
-                    pass
-
-            # If probe_debug is enabled, collect a few tokenized samples for inspection
-            if probe_debug and len(debug_tokenized_samples) < probe_debug_n:
-                try:
-                    token_strs = None
-                    # try to convert ids back to token strings if tokenizer supports it
-                    if hasattr(tokenizer, 'convert_ids_to_tokens'):
-                        try:
-                            token_strs = tokenizer.convert_ids_to_tokens(token_list)
-                        except Exception:
-                            token_strs = None
-                    debug_tokenized_samples.append((prompt, token_list if token_strs is None else token_strs))
-                except Exception:
-                    pass
-
-        for layer_idx, act in captured.items():
-            # decide indices to use (single index or list).
-            if probe_idx_list is not None:
-                # filter out-of-bounds indices
-                valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < act.shape[1]]
-                if valid_idxs:
-                    probe_act = act[0, valid_idxs, :].mean(axis=0)
-                else:
-                    probe_act = act[0, -1, :]
-            else:
-                # ensure probe_idx is within bounds; fallback to last token
-                use_idx = probe_idx if (0 <= probe_idx < act.shape[1]) else act.shape[1] - 1
-                probe_act = act[0, use_idx, :]
-            counts[layer_idx] += 1
-            delta = probe_act - mean_activations[layer_idx]
-            mean_activations[layer_idx] += delta / counts[layer_idx]
-        mx.eval(list(mean_activations.values()))
-
-    # If a probe marker was requested but never found in any example, warn once
-    if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0 and not marker_found_any:
-        # Diagnostic summary: show the literal marker, its token ids, and a few sample tokenized prompts
-        try:
-            marker_list = marker_tokens.tolist()
-        except Exception:
-            marker_list = None
-
-        diag_lines = [f"Warning: Probe marker {repr(probe_marker)} not found in any items. Using last token for all examples."]
-        diag_lines.append(f"Marker token ids: {marker_list}")
-        if sample_not_found_examples:
-            diag_lines.append("Sample prompts (truncated) and token ids where marker was not found:")
-            for i, (s_prompt, s_tokens) in enumerate(sample_not_found_examples):
-                truncated = (s_prompt[:200] + '...') if len(s_prompt) > 200 else s_prompt
-                diag_lines.append(f"  [{i+1}] prompt: {truncated}")
-                diag_lines.append(f"       tokens (len={len(s_tokens)}): {s_tokens[:40]}{'...' if len(s_tokens)>40 else ''}")
-
-        for line in diag_lines:
-            tqdm.write(line)
-        # Also log structured diagnostic
-        logging.warning("Probe marker not found diagnostic", extra={"extra_info": {"component": "cli", "event": "probe_marker_not_found_diag", "marker": probe_marker, "marker_tokens": marker_list, "sample_count": len(sample_not_found_examples)}})
-
-    # If probe_debug is enabled, print the debug tokenization samples
-    if probe_debug and debug_tokenized_samples:
-        tqdm.write("Probe debug samples (first {}):".format(len(debug_tokenized_samples)))
-        for i, (s_prompt, toks) in enumerate(debug_tokenized_samples):
-            truncated = (s_prompt[:200] + '...') if len(s_prompt) > 200 else s_prompt
-            tqdm.write(f"  [{i+1}] prompt: {truncated}")
-            # toks may be token ids or token strings depending on tokenizer support
-            if probe_debug_full and isinstance(toks, (list, tuple)) and toks and isinstance(toks[0], str):
-                # already token strings
-                toks_display = toks
-            else:
-                toks_display = toks[:80] if isinstance(toks, (list, tuple)) else toks
-            toks_len = len(toks) if hasattr(toks, '__len__') else 'unknown'
-            tqdm.write(f"       tokens/count: {toks_display}{'...' if isinstance(toks, (list, tuple)) and len(toks)>80 else ''} (len={toks_len})")
-        logging.info("Probe debug samples emitted", extra={"extra_info": {"component": "cli", "event": "probe_debug_samples", "count": len(debug_tokenized_samples)}})
-
-    # Print tokenizer diff for the marker to help diagnose tokenization mismatches
-    try:
-        diff = tokenizer_marker_diff(tokenizer, probe_marker) if probe_marker else None
-        if diff is not None:
-            tqdm.write(f"Tokenization of marker {repr(probe_marker)}: ids={diff.get('ids')}, tokens={diff.get('tokens')}")
-            logging.info("Marker tokenization diff", extra={"extra_info": {"component": "cli", "event": "marker_tokenization_diff", "marker": probe_marker, "marker_ids": diff.get('ids'), "marker_tokens": diff.get('tokens')}})
-    except Exception:
-        pass
-
-    return mean_activations
 
 def run_abliteration(args: argparse.Namespace):
     """Runs the main abliteration process.
@@ -418,33 +243,46 @@ def run_abliteration(args: argparse.Namespace):
     logging.info("Probing activations", extra={"extra_info": {"component": "cli", "event": "probing_start"}})
     layers_to_probe = parse_layers(args.layers, num_layers)
     wrapper = ActivationProbeWrapper(model)
-    harmful_activations = get_mean_activations(
+    
+    harmful_activations, harmful_debug = get_mean_activations(
         harmful_dataset,
         wrapper,
         tokenizer,
         layers_to_probe,
         model_config,
         "Probing harmful prompts",
-        final_probe_marker,
+        progress_bar_fn=tqdm,
+        probe_marker=final_probe_marker,
         probe_debug=args.probe_debug,
         probe_debug_n=args.probe_debug_n,
         probe_mode=args.probe_mode,
         probe_span=args.probe_span,
     )
-    harmless_activations = get_mean_activations(
+    
+    harmless_activations, harmless_debug = get_mean_activations(
         harmless_dataset,
         wrapper,
         tokenizer,
         layers_to_probe,
         model_config,
         "Probing harmless prompts",
-        final_probe_marker,
+        progress_bar_fn=tqdm,
+        probe_marker=final_probe_marker,
         probe_debug=args.probe_debug,
         probe_debug_n=args.probe_debug_n,
         probe_debug_full=args.probe_debug_full,
         probe_mode=args.probe_mode,
         probe_span=args.probe_span,
     )
+    
+    # Print debug info if any
+    if harmful_debug:
+        for line in harmful_debug:
+            tqdm.write(line)
+    if harmless_debug:
+        for line in harmless_debug:
+            tqdm.write(line)
+            
     logging.info("Activation probing complete", extra={"extra_info": {"component": "cli", "event": "probing_end"}})
 
     logging.info("Computing refusal vector", extra={"extra_info": {"component": "cli", "event": "vector_computation_start"}})

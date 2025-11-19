@@ -43,7 +43,7 @@ import logging
 
 import mlx.core as mx
 
-from .abliteration import get_ablated_parameters, ActivationProbeWrapper, DEFAULT_TARGET_MODULES
+from .abliteration import get_ablated_parameters, ActivationProbeWrapper, DEFAULT_TARGET_MODULES, get_mean_activations
 from .abliteration import evaluate_refusal_behavior
 from .utils import find_probe_indices
 
@@ -105,64 +105,21 @@ def _collect_mean_activation_for_layer(
 ) -> mx.array:
     """Compute mean activation vector for a *single* layer over a small subset.
 
-    This intentionally duplicates a *minimal* subset of logic from
-    `cli.get_mean_activations` to avoid the progress bar noise and the overhead
-    of computing for multiple layers.
+    This uses the shared `get_mean_activations` logic.
     """
-    hidden_size = config["hidden_size"]
-    mean = mx.zeros(hidden_size)
-    count = 0
-    max_seq_len = config.get("max_position_embeddings", 4096)
-
-    marker_tokens = None
-    marker_list = None
-    if probe_marker and probe_marker.strip():
-        try:
-            marker_tokens = mx.array(tokenizer.encode(probe_marker, add_special_tokens=False))
-            marker_list = marker_tokens.tolist()
-        except Exception:
-            marker_tokens = None
-            marker_list = None
-
-    for item in dataset_subset:
-        prompt = item.get("prompt") or item.get("text")
-        if not prompt:
-            continue
-        tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
-        if len(tokens) > max_seq_len:
-            tokens = tokens[:max_seq_len]
-
-        _, captured = wrapper(tokens[None], mask=None, layers_to_probe=[layer_idx])
-        act = captured.get(layer_idx)
-        if act is None:
-            continue
-
-        token_list = tokens.tolist()
-        indices, _ = find_probe_indices(token_list, marker_list, probe_mode, probe_span)
-        
-        probe_idx = -1
-        probe_idx_list = None
-        if isinstance(indices, list):
-            probe_idx_list = indices
-        else:
-            probe_idx = indices
-
-        if probe_idx_list is not None:
-            valid = [idx for idx in probe_idx_list if 0 <= idx < act.shape[1]]
-            if valid:
-                vec = act[0, valid, :].mean(axis=0)
-            else:
-                vec = act[0, -1, :]
-        else:
-            use_idx = probe_idx if (0 <= probe_idx < act.shape[1]) else act.shape[1] - 1
-            vec = act[0, use_idx, :]
-
-        count += 1
-        delta = vec - mean
-        mean = mean + delta / count
-
-    mx.eval(mean)
-    return mean
+    activations, _ = get_mean_activations(
+        dataset_subset,
+        wrapper,
+        tokenizer,
+        [layer_idx],
+        config,
+        desc="",
+        progress_bar_fn=None,
+        probe_marker=probe_marker,
+        probe_mode=probe_mode,
+        probe_span=probe_span,
+    )
+    return activations[layer_idx]
 
 
 def compute_alignment_metric(

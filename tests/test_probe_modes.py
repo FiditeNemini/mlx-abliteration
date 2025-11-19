@@ -57,18 +57,18 @@ def test_probe_modes_marker_at_end_and_middle(tmp_path):
     from numpy.testing import assert_allclose
 
     # follow-token: first example -> use token index 1 (value [3,4,5]), second -> marker at end -> fallback to marker token index 0 ([0,1,2])
-    means_follow = get_mean_activations(ds, wrapper, tokenizer, [0], {"hidden_size": 3, "max_position_embeddings": 64}, "desc", probe_marker="</think>", probe_mode="follow-token")
+    means_follow, _ = get_mean_activations(ds, wrapper, tokenizer, [0], {"hidden_size": 3, "max_position_embeddings": 64}, "desc", probe_marker="</think>", probe_mode="follow-token")
     expected_follow = np.array([ (3.0 + 0.0) / 2.0, (4.0 + 1.0) / 2.0, (5.0 + 2.0) / 2.0 ])
     assert 0 in means_follow
     assert_allclose(np.array(means_follow[0]), expected_follow)
 
     # marker-token: both examples should use the marker token index 0 -> vectors [0,1,2]
-    means_marker = get_mean_activations(ds, wrapper, tokenizer, [0], {"hidden_size": 3, "max_position_embeddings": 64}, "desc", probe_marker="</think>", probe_mode="marker-token")
+    means_marker, _ = get_mean_activations(ds, wrapper, tokenizer, [0], {"hidden_size": 3, "max_position_embeddings": 64}, "desc", probe_marker="</think>", probe_mode="marker-token")
     expected_marker = np.array([0.0, 1.0, 2.0])
     assert 0 in means_marker
     assert_allclose(np.array(means_marker[0]), expected_marker)
 
     # last-token: both examples pick last token (first example index 1 -> [3,4,5], second example index 0 -> [0,1,2]) => same as follow-token here
-    means_last = get_mean_activations(ds, wrapper, tokenizer, [0], {"hidden_size": 3, "max_position_embeddings": 64}, "desc", probe_marker="</think>", probe_mode="last-token")
+    means_last, _ = get_mean_activations(ds, wrapper, tokenizer, [0], {"hidden_size": 3, "max_position_embeddings": 64}, "desc", probe_marker="</think>", probe_mode="last-token")
     assert 0 in means_last
     assert_allclose(np.array(means_last[0]), expected_follow)
