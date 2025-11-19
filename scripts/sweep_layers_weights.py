@@ -7,14 +7,15 @@ Saves results to <model_dir>/sweep_results.json
 import argparse
 import json
 from pathlib import Path
-import numpy as np
-import mlx.core as mx
-from tqdm import tqdm
 
-from core.abliteration import ActivationProbeWrapper, get_ablated_parameters, evaluate_refusal_behavior, get_mean_activations, DEFAULT_TARGET_MODULES
-from core.utils import tokenizer_marker_diff
-from core.asset_resolver import resolve_asset
-from mlx_lm.utils import tree_flatten
+# Lazy imports inside main to speed up initial feedback
+# import numpy as np
+# import mlx.core as mx
+# from tqdm import tqdm
+# from core.abliteration import ...
+# from core.utils import tokenizer_marker_diff
+# from core.asset_resolver import resolve_asset
+# from mlx_lm.utils import tree_flatten
 
 
 def parse_args():
@@ -31,6 +32,7 @@ def parse_args():
 
 def load_dataset_smart(path_or_id: str, cache_dir: str = ".cache"):
     """Load a dataset from local path or HF Hub."""
+    from core.asset_resolver import resolve_asset
     # First, try to resolve it (download if needed)
     try:
         resolved_path = resolve_asset(path_or_id, "datasets", cache_dir)
@@ -81,6 +83,14 @@ def load_dataset_smart(path_or_id: str, cache_dir: str = ".cache"):
 
 
 def main():
+    print("Importing libraries...", flush=True)
+    import numpy as np
+    import mlx.core as mx
+    from tqdm import tqdm
+
+    from core.abliteration import ActivationProbeWrapper, get_ablated_parameters, evaluate_refusal_behavior, get_mean_activations, DEFAULT_TARGET_MODULES
+    from mlx_lm.utils import tree_flatten
+
     args = parse_args()
     model_dir = Path(args.model_dir)
     if not model_dir.exists():
@@ -277,4 +287,5 @@ def main():
 
 
 if __name__ == '__main__':
+    print("Starting sweep script...", flush=True)
     main()
