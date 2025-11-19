@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import numpy as np
 import mlx.core as mx
+from tqdm import tqdm
 
 from core.abliteration import ActivationProbeWrapper, get_ablated_parameters, evaluate_refusal_behavior, get_mean_activations, DEFAULT_TARGET_MODULES
 from core.utils import tokenizer_marker_diff
@@ -96,12 +97,13 @@ def main():
             source_model_path = None
 
     load_path = source_model_path or str(model_dir)
-    print(f"Loading model from {load_path}")
+    print(f"Loading model from {load_path}...")
     import mlx_lm
 
     model, tokenizer = mlx_lm.load(str(load_path))
 
     # load datasets
+    print("Loading datasets...")
     harmless = load_dataset_smart(args.harmless, args.cache_dir)
     harmful = load_dataset_smart(args.harmful, args.cache_dir)
 
@@ -139,8 +141,8 @@ def main():
     print(f"Probing {len(harmless)} harmless and {len(harmful)} harmful examples across {num_layers} layers")
 
     # Compute mean activations for all layers in one pass (reuse earlier function signature)
-    harmless_means, _ = get_mean_activations(harmless, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmless", probe_mode="follow-token")
-    harmful_means, _ = get_mean_activations(harmful, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmful", probe_mode="follow-token")
+    harmless_means, _ = get_mean_activations(harmless, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmless", probe_mode="follow-token", progress_bar_fn=tqdm)
+    harmful_means, _ = get_mean_activations(harmful, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmful", probe_mode="follow-token", progress_bar_fn=tqdm)
 
     # Compute per-layer diff norm
     layer_scores = []
