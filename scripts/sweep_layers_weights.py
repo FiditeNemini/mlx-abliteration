@@ -195,6 +195,10 @@ def main():
     results = {"model": str(load_path), "top_layers": [], "trials": {}}
     best_config = None
 
+    total_trials = len(topk) * len(strengths)
+    current_trial = 0
+    print(f"\nStarting sweep: {len(topk)} layers x {len(strengths)} strengths = {total_trials} total trials")
+
     for layer_idx, score in topk:
         # compute refusal vector for this layer
         harm_mean = harmful_means.get(layer_idx)
@@ -207,6 +211,9 @@ def main():
         results["trials"][layer_key] = {"score": score, "strengths": []}
 
         for s in strengths:
+            current_trial += 1
+            print(f"[{current_trial}/{total_trials}] Testing Layer {layer_idx} @ Strength {s}...", end="", flush=True)
+
             # restore original targeted params
             for k, v in original_target_params.items():
                 try:
@@ -227,7 +234,7 @@ def main():
             # evaluate
             eval_res = evaluate_refusal_behavior(model, tokenizer, prompts)
             refusal_rate = float(eval_res.get("refusal_rate"))
-            print(f"Layer {layer_idx}  strength {s}: refusal_rate={refusal_rate}")
+            print(f" Refusal Rate: {refusal_rate:.2f}")
             results["trials"][layer_key]["strengths"].append({"strength": float(s), "refusal_rate": refusal_rate, "total": int(eval_res.get("total",0)), "refused": int(eval_res.get("refused",0))})
 
             # Track best configuration (lowest refusal rate, then lowest strength)
