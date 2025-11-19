@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import mlx.core as mx
 
-from core.abliteration import ActivationProbeWrapper, get_ablated_parameters, evaluate_refusal_behavior
+from core.abliteration import ActivationProbeWrapper, get_ablated_parameters, evaluate_refusal_behavior, get_mean_activations, DEFAULT_TARGET_MODULES
 from core.utils import tokenizer_marker_diff
 from mlx_lm.utils import tree_flatten
 
@@ -102,14 +102,8 @@ def main():
     print(f"Probing {len(harmless)} harmless and {len(harmful)} harmful examples across {num_layers} layers")
 
     # Compute mean activations for all layers in one pass (reuse earlier function signature)
-    # Import get_mean_activations from the CLI module. Try both possible import paths
-    try:
-        from core.cli import get_mean_activations
-    except Exception:
-        from cli import get_mean_activations
-
-    harmless_means = get_mean_activations(harmless, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmless", probe_mode="follow-token")
-    harmful_means = get_mean_activations(harmful, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmful", probe_mode="follow-token")
+    harmless_means, _ = get_mean_activations(harmless, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmless", probe_mode="follow-token")
+    harmful_means, _ = get_mean_activations(harmful, wrapper, tokenizer, layers_to_probe, cfg or {}, "Sweep harmful", probe_mode="follow-token")
 
     # Compute per-layer diff norm
     layer_scores = []
@@ -154,14 +148,7 @@ def main():
     flat = tree_flatten(model.parameters())
     base_map = dict(flat)
 
-    target_patterns = [
-        "self_attn.o_proj",
-        "mlp.down_proj",
-        "mlp.c_proj",
-        "mlp.up_proj",
-        "mlp.switch_mlp.down_proj",
-        "mlp.switch_mlp.up_proj",
-    ]
+    target_patterns = DEFAULT_TARGET_MODULES
     def _is_target(k: str) -> bool:
         return any(tp in k for tp in target_patterns) and k.endswith("weight")
 
