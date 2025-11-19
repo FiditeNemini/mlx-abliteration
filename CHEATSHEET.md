@@ -105,25 +105,27 @@ This will:
 
 **Option:** `-s` or `--ablation-strength`  
 **What it does:** Controls how strongly the refusal behavior is removed  
-**Default:** 1.0  
-**Range:** Usually 0.5 to 2.0  
+**Default:** 0.75  
+**Range:** Usually 0.5 to 1.5  
 
 **Think of it like:**
-- **0.5** = Light touch (removes some refusal)
-- **1.0** = Standard strength (removes most refusal) ← **Start here**
-- **1.5-2.0** = Strong (removes almost all refusal, but might affect other behaviors)
+- **0.5** = Light touch (removes some refusal, very safe)
+- **0.75** = Balanced strength (good starting point) ← **Start here**
+- **1.0** = Standard strength (removes most refusal)
+- **1.5+** = Strong (removes almost all refusal, but may cause instability)
 
 **Examples:**
 ```bash
--s 1.0    # Default, balanced
--s 0.75   # More conservative
--s 1.5    # More aggressive
+-s 0.75   # Default, balanced (recommended)
+-s 0.5    # Very conservative (if model becomes unstable)
+-s 1.0    # Standard strength
+-s 1.5    # More aggressive (use with caution)
 ```
 
 **When to adjust:**
-- Start with 1.0
-- If the model still refuses too much → increase to 1.5
-- If the model seems "broken" or answers poorly → decrease to 0.75
+- Start with 0.75 (default)
+- If the model still refuses too much → increase to 1.0 or 1.2
+- If the model outputs junk or becomes unstable → decrease to 0.5
 
 ---
 
@@ -450,7 +452,8 @@ python cli.py -m my-model -o output2 -l 20,21,22,23 -u 22
 ### Workflow 2: Quick Ablation (When You Know What You're Doing)
 
 ```bash
-python cli.py -m my-model -o output -s 1.0
+python cli.py -m my-model -o output
+# Uses default 0.75 strength - good for most models
 ```
 
 ### Workflow 3: Let the Tool Figure It Out
@@ -459,16 +462,16 @@ python cli.py -m my-model -o output -s 1.0
 python cli.py -m my-model -o output --adaptive -v
 ```
 
-### Workflow 4: Conservative Ablation (Keep Some Safety)
+### Workflow 4: Very Conservative Ablation (Maximum Safety)
 
 ```bash
 python cli.py -m my-model -o output -s 0.5 --refusal-dir-method difference
 ```
 
-### Workflow 5: Aggressive Ablation (Remove All Refusals)
+### Workflow 5: Stronger Ablation (If Default is Too Weak)
 
 ```bash
-python cli.py -m my-model -o output -s 1.5 --ablate-k 2
+python cli.py -m my-model -o output -s 1.2 --ablate-k 2
 ```
 
 ---
@@ -500,7 +503,7 @@ python cli.py -m my-model -o output \
 
 ### For Intermediate Users
 
-1. **Experiment with strength:** Try 0.75, 1.0, and 1.5
+1. **Experiment with strength:** Try 0.5, 0.75, and 1.0
 2. **Use specific layers:** After finding which layers work best
 3. **Enable evaluation:** Add `--eval-after` to test results
 4. **Use adaptive mode:** When you want optimal results
@@ -517,11 +520,12 @@ python cli.py -m my-model -o output \
 ## Troubleshooting
 
 ### "Model still refuses too much"
-- **Solution:** Increase ablation strength (`-s 1.5` or `-s 2.0`)
+- **Solution:** Increase ablation strength (`-s 1.0` or `-s 1.2`)
 - **Or:** Try adaptive mode (`--adaptive`)
 
-### "Model gives nonsense answers"
-- **Solution:** Decrease ablation strength (`-s 0.5` or `-s 0.75`)
+### "Model gives nonsense answers or becomes unstable"
+- **Solution:** Decrease ablation strength (`-s 0.5` or even `-s 0.3`)
+- **Or:** Use fewer layers or different layer selection
 - **Or:** Use fewer layers (`-l` with specific layers instead of `all`)
 
 ### "Tool is too slow"
@@ -545,8 +549,8 @@ python cli.py -m my-model -o output \
 | Goal | Command |
 |------|---------|
 | Basic ablation | `python cli.py -m model -o output` |
-| Conservative | `python cli.py -m model -o output -s 0.5` |
-| Aggressive | `python cli.py -m model -o output -s 1.5` |
+| Very conservative | `python cli.py -m model -o output -s 0.5` |
+| Stronger (if needed) | `python cli.py -m model -o output -s 1.2` |
 | Auto-tuned | `python cli.py -m model -o output --adaptive` |
 | Fast (specific layers) | `python cli.py -m model -o output -l 20,21,22` |
 | With testing | `python cli.py -m model -o output --eval-after` |

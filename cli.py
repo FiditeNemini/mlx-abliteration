@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     abl_group = parser.add_argument_group("Abliteration Parameters")
     abl_group.add_argument("-l", "--layers", type=str, default="all", help="Layers to probe: 'all' or comma-separated list (e.g., '15,16').")
     abl_group.add_argument("-u", "--use-layer", type=int, default=-1, help="Layer index for the refusal vector. Default: -1 (last layer).")
-    abl_group.add_argument("-s", "--ablation-strength", type=float, default=1.0, help="Strength of the ablation effect.")
+    abl_group.add_argument("-s", "--ablation-strength", type=float, default=0.75, help="Strength of the ablation effect. Recommended range: 0.5-1.5. Start with 0.75.")
     abl_group.add_argument("--probe-marker", type=str, default=None, help="String marker for precise activation probing (e.g., '</thinking>').")
     abl_group.add_argument("--probe-mode", type=str, default="follow-token", choices=["follow-token", "marker-token", "last-token", "thinking-span"], help="How to select the probe token when a marker is found: 'follow-token' (token after marker), 'marker-token' (the marker token itself), 'last-token' (always use last token), or 'thinking-span' (average a small span after the marker).")
     abl_group.add_argument("--probe-span", type=int, default=1, help="Number of tokens to average after the probe marker when using 'thinking-span' probe mode. Defaults to 1 (single token).")
@@ -173,6 +173,17 @@ def get_mean_activations(
 
     for item in tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
+        
+        # Handle chat-formatted datasets with "messages" key
+        if not prompt and "messages" in item:
+            # Extract user message content from messages list
+            messages = item["messages"]
+            if isinstance(messages, list):
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "user":
+                        prompt = msg.get("content")
+                        break
+        
         if not prompt:
             tqdm.write("Skipping empty prompt.")
             continue
@@ -493,6 +504,17 @@ def run_abliteration(args: argparse.Namespace):
                 if collected >= max_samples:
                     break
                 prompt = item.get("prompt") or item.get("text")
+                
+                # Handle chat-formatted datasets with "messages" key
+                if not prompt and "messages" in item:
+                    # Extract user message content from messages list
+                    messages = item["messages"]
+                    if isinstance(messages, list):
+                        for msg in messages:
+                            if isinstance(msg, dict) and msg.get("role") == "user":
+                                prompt = msg.get("content")
+                                break
+                
                 if not prompt:
                     continue
                 tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))

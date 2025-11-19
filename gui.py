@@ -100,6 +100,17 @@ def get_mean_activations_from_dataset(
 
     for item in progress.tqdm(dataset, desc=desc):
         prompt = item.get("prompt") or item.get("text")
+        
+        # Handle chat-formatted datasets with "messages" key
+        if not prompt and "messages" in item:
+            # Extract user message content from messages list
+            messages = item["messages"]
+            if isinstance(messages, list):
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "user":
+                        prompt = msg.get("content")
+                        break
+        
         if not prompt:
             continue
         tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
@@ -215,6 +226,36 @@ def get_mean_activations_from_dataset(
 
     return mean_activations, probe_debug_lines
 
+def _load_maybe_local_json(path_str: str):
+    """
+    Helper function to load datasets that may be local JSONL files or Hub IDs.
+    
+    If path_str points to a local .json or .jsonl file, use the datasets
+    `json` loader with `data_files` so the file is accepted. Otherwise
+    attempt to load it as a normal dataset identifier.
+    """
+    p = Path(path_str)
+    # If it's a local file and looks like JSON/JSONL, use the json loader
+    if p.is_file() and p.suffix in (".json", ".jsonl"):
+        try:
+            ds = load_dataset("json", data_files=str(p))
+        except TypeError:
+            ds = load_dataset(str(p))
+    else:
+        try:
+            ds = load_dataset(path_str)
+        except Exception:
+            # Fallback: try treating it as a json file path
+            try:
+                ds = load_dataset("json", data_files=str(p))
+            except TypeError:
+                ds = load_dataset(str(p))
+    
+    # Common case: datasets return a dict with a 'train' split
+    if isinstance(ds, dict) and "train" in ds:
+        return ds["train"]
+    return ds
+
 def run_abliteration_stream(
     model_id: str,
     harmless_id: str,
@@ -327,8 +368,8 @@ def run_abliteration_stream(
         num_layers = model_config["num_hidden_layers"]
         yield log_and_yield(f"Model '{model_id}' loaded with {num_layers} layers.", {"event": "model_info", "actual_output": {"num_layers": num_layers}}), None
 
-        harmless_dataset = load_dataset(harmless_ds_path, split="train")
-        harmful_dataset = load_dataset(harmful_ds_path, split="train")
+        harmless_dataset = _load_maybe_local_json(harmless_ds_path)
+        harmful_dataset = _load_maybe_local_json(harmful_ds_path)
 
         yield log_and_yield("Probing Activations", {"event": "probing_start"}), None
         layers_to_probe = list(range(num_layers)) if layers_str.lower() == 'all' else [int(x.strip()) for x in layers_str.split(",")]
@@ -571,7 +612,7 @@ def create_ui() -> gr.Blocks:
                     with gr.TabItem("Advanced Parameters"):
                         layers_input = gr.Textbox(label="Layers to Probe", value="all", info="A comma-separated list of layer indices or 'all'.")
                         use_layer_slider = gr.Slider(minimum=-48, maximum=47, step=1, value=-1, label="Use Refusal Vector from Layer", info="The layer index for the refusal vector. Negative values count from the end.")
-                        strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=1.0, label="Ablation Strength", info="The strength of the ablation effect. >1.0 amplifies the effect.")
+                        strength_slider = gr.Slider(minimum=0.0, maximum=5.0, step=0.1, value=0.75, label="Ablation Strength", info="Strength of ablation. Recommended: 0.5-1.5. Start with 0.75. Higher values may cause instability.")
                         probe_marker_input = gr.Code(label="Probe Marker", language=None, lines=1)
                         probe_mode_input = gr.Dropdown(label="Probe Mode", choices=["follow-token", "marker-token", "last-token", "thinking-span"], value="follow-token", info="How to select the probe token when a marker is found.")
                         probe_span_input = gr.Number(label="Probe Span", value=1, precision=0, info="Number of tokens to average after the probe marker when using 'thinking-span'. Increase to 2-4 if the transition tokenizes into multiple tokens.")
