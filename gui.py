@@ -41,7 +41,7 @@ from core.abliteration import (
     save_ablated_model,
 )
 from core.logging_config import setup_structured_logging
-from core.utils import extract_eot_from_chat_template
+from core.utils import extract_eot_from_chat_template, find_probe_indices
 import mlx.core as mx
 import mlx_lm
 from mlx_lm.utils import tree_flatten
@@ -119,54 +119,34 @@ def get_mean_activations_from_dataset(
 
         _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
 
-        probe_idx = -1  # Default to the last token
+        token_list = tokens.tolist()
+        marker_list = marker_tokens.tolist() if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0 else None
+        
+        indices, found = find_probe_indices(token_list, marker_list, probe_mode, probe_span)
+        
+        probe_idx = -1
         probe_idx_list = None
-        if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0:
-            token_list = tokens.tolist()
-            marker_list = marker_tokens.tolist()
-            found = False
-            # Search for the last occurrence of the marker by searching backwards
-            for i in range(len(token_list) - len(marker_list), -1, -1):
-                if token_list[i:i + len(marker_list)] == marker_list:
-                    # Decide index according to probe_mode
-                    if probe_mode == "follow-token":
-                        potential_idx = i + len(marker_list)
-                        if potential_idx < len(token_list):
-                            probe_idx = potential_idx
-                        else:
-                            # fallback to marker token if marker at end
-                            probe_idx = i + len(marker_list) - 1
-                    elif probe_mode == "marker-token":
-                        probe_idx = i + len(marker_list) - 1
-                    elif probe_mode == "thinking-span":
-                        # Average activations across a span of tokens after the marker
-                        start = i + len(marker_list)
-                        if start < len(token_list):
-                            end = min(len(token_list), start + probe_span)
-                            probe_idx_list = list(range(start, end))
-                        else:
-                            # marker at end: fallback to marker token
-                            probe_idx = i + len(marker_list) - 1
-                    elif probe_mode == "last-token":
-                        probe_idx = len(token_list) - 1
-                    found = True
-                    break
+        
+        if isinstance(indices, list):
+            probe_idx_list = indices
+        else:
+            probe_idx = indices
 
-            if found:
-                marker_found_any = True
-                if probe_debug and len(probe_debug_lines) < probe_debug_n:
-                    truncated = (prompt[:200] + '...') if len(prompt) > 200 else prompt
-                    if probe_idx_list is not None:
-                        probe_debug_lines.append(f"probe_idx_list={probe_idx_list}, prompt={truncated}")
-                    else:
-                        probe_debug_lines.append(f"probe_idx={probe_idx}, prompt={truncated}")
-            else:
-                # store a small sample for diagnostics (prompt, tokens)
-                if len(sample_not_found_examples) < probe_debug_n:
-                    try:
-                        sample_not_found_examples.append((prompt, token_list))
-                    except Exception:
-                        pass
+        if found:
+            marker_found_any = True
+            if probe_debug and len(probe_debug_lines) < probe_debug_n:
+                truncated = (prompt[:200] + '...') if len(prompt) > 200 else prompt
+                if probe_idx_list is not None:
+                    probe_debug_lines.append(f"probe_idx_list={probe_idx_list}, prompt={truncated}")
+                else:
+                    probe_debug_lines.append(f"probe_idx={probe_idx}, prompt={truncated}")
+        elif marker_list:
+            # store a small sample for diagnostics (prompt, tokens)
+            if len(sample_not_found_examples) < probe_debug_n:
+                try:
+                    sample_not_found_examples.append((prompt, token_list))
+                except Exception:
+                    pass
 
         for layer_idx, act in captured.items():
             # decide indices to use (single index or list).
@@ -451,27 +431,15 @@ def run_abliteration_stream(
                     if arr is None:
                         continue
 
+                    token_list = tokens.tolist()
+                    indices, _ = find_probe_indices(token_list, marker_list, probe_mode, probe_span)
+                    
                     probe_idx = -1
                     probe_idx_list = None
-                    if marker_list:
-                        token_list = tokens.tolist()
-                        for i in range(len(token_list) - len(marker_list), -1, -1):
-                            if token_list[i:i + len(marker_list)] == marker_list:
-                                if probe_mode == "follow-token":
-                                    potential_idx = i + len(marker_list)
-                                    probe_idx = potential_idx if potential_idx < len(token_list) else i + len(marker_list) - 1
-                                elif probe_mode == "marker-token":
-                                    probe_idx = i + len(marker_list) - 1
-                                elif probe_mode == "thinking-span":
-                                    start = i + len(marker_list)
-                                    if start < len(token_list):
-                                        end = min(len(token_list), start + probe_span)
-                                        probe_idx_list = list(range(start, end))
-                                    else:
-                                        probe_idx = i + len(marker_list) - 1
-                                elif probe_mode == "last-token":
-                                    probe_idx = len(token_list) - 1
-                                break
+                    if isinstance(indices, list):
+                        probe_idx_list = indices
+                    else:
+                        probe_idx = indices
 
                     if probe_idx_list is not None:
                         valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < arr.shape[1]]

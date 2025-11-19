@@ -27,6 +27,18 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TARGET_MODULES = [
+    "self_attn.o_proj",
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "mlp.down_proj",
+    "mlp.c_proj",
+    "mlp.up_proj",
+    "mlp.switch_mlp.down_proj",
+    "mlp.switch_mlp.up_proj",
+]
+
 
 class ActivationProbeWrapper(nn.Module):
     """A wrapper around an MLX model to probe and capture activations.
@@ -205,17 +217,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
         # Include common naming variants used across model families (e.g.,
         # 'switch_mlp.down_proj' or 'mlp.up_proj') so default ablation
         # targets match more models out of the box.
-        target_modules = [
-            "self_attn.o_proj",
-            "self_attn.q_proj",
-            "self_attn.k_proj",
-            "self_attn.v_proj",
-            "mlp.down_proj",
-            "mlp.c_proj",
-            "mlp.up_proj",
-            "mlp.switch_mlp.down_proj",
-            "mlp.switch_mlp.up_proj",
-        ]
+        target_modules = DEFAULT_TARGET_MODULES
 
     # Support single-vector (shape [H]) or multiple components (shape [K, H])
     # Ensure refusal_vector is an array with leading dimension = K (number of components)
@@ -227,7 +229,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
     v_norms = []
     for i in range(rv.shape[0]):
         v = rv[i]
-        v_norm = v / (mx.linalg.norm(v) + 1e-9)
+        v_norm = v / mx.maximum(mx.linalg.norm(v), 1e-9)
         v_norms.append(v_norm)
 
     # Pre-calculate projection column vectors for each component

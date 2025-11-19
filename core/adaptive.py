@@ -43,8 +43,9 @@ import logging
 
 import mlx.core as mx
 
-from .abliteration import get_ablated_parameters, ActivationProbeWrapper
+from .abliteration import get_ablated_parameters, ActivationProbeWrapper, DEFAULT_TARGET_MODULES
 from .abliteration import evaluate_refusal_behavior
+from .utils import find_probe_indices
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def _normalize_components(refusal_vector: mx.array) -> mx.array:
     normed = []
     for i in range(rv.shape[0]):
         v = rv[i]
-        n = mx.linalg.norm(v) + 1e-9
+        n = mx.maximum(mx.linalg.norm(v), 1e-9)
         normed.append(v / n)
     return mx.stack(normed, axis=0)
 
@@ -136,27 +137,15 @@ def _collect_mean_activation_for_layer(
         if act is None:
             continue
 
+        token_list = tokens.tolist()
+        indices, _ = find_probe_indices(token_list, marker_list, probe_mode, probe_span)
+        
         probe_idx = -1
         probe_idx_list = None
-        if marker_list:
-            token_list = tokens.tolist()
-            for i in range(len(token_list) - len(marker_list), -1, -1):
-                if token_list[i:i+len(marker_list)] == marker_list:
-                    if probe_mode == "follow-token":
-                        pidx = i + len(marker_list)
-                        probe_idx = pidx if pidx < len(token_list) else i + len(marker_list) - 1
-                    elif probe_mode == "marker-token":
-                        probe_idx = i + len(marker_list) - 1
-                    elif probe_mode == "thinking-span":
-                        start = i + len(marker_list)
-                        if start < len(token_list):
-                            end = min(len(token_list), start + probe_span)
-                            probe_idx_list = list(range(start, end))
-                        else:
-                            probe_idx = i + len(marker_list) - 1
-                    elif probe_mode == "last-token":
-                        probe_idx = len(token_list) - 1
-                    break
+        if isinstance(indices, list):
+            probe_idx_list = indices
+        else:
+            probe_idx = indices
 
         if probe_idx_list is not None:
             valid = [idx for idx in probe_idx_list if 0 <= idx < act.shape[1]]
@@ -265,17 +254,7 @@ def adaptive_search_ablation_strength(
     base_param_map = dict(base_flat)
 
     # Identify target module keys (reuse default patterns from get_ablated_parameters)
-    target_patterns = [
-        "self_attn.o_proj",
-        "self_attn.q_proj",
-        "self_attn.k_proj",
-        "self_attn.v_proj",
-        "mlp.down_proj",
-        "mlp.c_proj",
-        "mlp.up_proj",
-        "mlp.switch_mlp.down_proj",
-        "mlp.switch_mlp.up_proj",
-    ]
+    target_patterns = DEFAULT_TARGET_MODULES
     def _is_target(k: str) -> bool:
         return any(tp in k for tp in target_patterns) and k.endswith("weight")
 
