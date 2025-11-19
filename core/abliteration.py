@@ -65,7 +65,15 @@ class ActivationProbeWrapper(nn.Module):
         
         # Attempt to find the base model or container with layers
         self.base_model = None
-        if hasattr(model, "layers"):
+        
+        # Prefer the inner model if it has both layers and embeddings
+        if hasattr(model, "model") and hasattr(model.model, "layers") and (hasattr(model.model, "embed_tokens") or hasattr(model.model, "wte")):
+            self.base_model = model.model
+        # Otherwise check the top level model
+        elif hasattr(model, "layers") and (hasattr(model, "embed_tokens") or hasattr(model, "wte")):
+            self.base_model = model
+        # Fallback: just look for layers
+        elif hasattr(model, "layers"):
             self.base_model = model
         elif hasattr(model, "model") and hasattr(model.model, "layers"):
             self.base_model = model.model
@@ -155,7 +163,10 @@ class ActivationProbeWrapper(nn.Module):
         cache = DummyCache()
 
         for i, layer in enumerate(self.model_layers):
-            output = layer(h, mask=mask, cache=cache)
+            # Create a fresh cache for each layer to avoid state leakage between layers
+            # (crucial for Mamba/Linear Attention models that store state in cache[0])
+            layer_cache = DummyCache()
+            output = layer(h, mask=mask, cache=layer_cache)
             h = output[0] if isinstance(output, tuple) else output
             if layers_to_probe is not None and i in layers_to_probe:
                 captured_activations[i] = h
@@ -302,7 +313,36 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
                 continue
 
             # Dequantize, ablate, and then re-quantize
-            w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
+            try:
+                w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
+            except Exception as e:
+                # Fallback for formats like mxfp4 where dequantize might fail due to types/biases
+                logger.warning(f"mx.dequantize failed for {key}: {e}. Attempting fallback via forward pass.", extra={"extra_info": {"event": "dequantize_fallback", "inputs": {"key": key}}})
+                try:
+                    # Infer input_dim from scales
+                    # scales shape is (out, in/group)
+                    out_dim = scales.shape[0]
+                    in_dim = scales.shape[1] * module.group_size
+                    
+                    # Create identity matrix (input_dim x input_dim)
+                    # Use float16 to save memory/time
+                    I = mx.eye(in_dim, dtype=mx.float16)
+                    
+                    # Forward pass: y = x @ W.T
+                    # I @ W.T = W.T
+                    # Note: module(I) uses the layer's forward pass which handles specific quantization modes
+                    w_T = module(I)
+                    
+                    # If the layer has an additive bias, subtract it
+                    if hasattr(module, "bias") and module.bias is not None:
+                        w_T = w_T - module.bias
+                        
+                    w_float = w_T.T
+                except Exception as e2:
+                    logger.error(f"Fallback dequantization failed for {key}: {e2}", extra={"extra_info": {"event": "dequantize_failed", "inputs": {"key": key}}})
+                    new_flat_params.append((key, W))
+                    continue
+
             # w_float may have shape (H, out) or (out, H) depending on layer layout.
             # Ensure we project along the hidden dimension (H) by transposing if needed.
             try:
@@ -367,6 +407,13 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
 
         # Handle standard linear layers
         elif W.ndim == 2:
+            # Check if it's a floating point type to avoid processing packed weights (e.g. BitLinear)
+            # that don't inherit from QuantizedLinear but have 2D weight tensors.
+            if not (W.dtype == mx.float32 or W.dtype == mx.float16 or W.dtype == mx.bfloat16):
+                logger.warning(f"Skipping ablation for non-floating point weight {key} with dtype {W.dtype}", extra={"extra_info": {"event": "skip_non_float", "inputs": {"key": key, "dtype": str(W.dtype)}}})
+                new_flat_params.append((key, W))
+                continue
+
             # Project the weight matrix onto the refusal vector
             # Some weight matrices have shape (H, out) while others are (out, H).
             # We want to project along the hidden dimension H (length of refusal_vector).

@@ -26,6 +26,7 @@ def parse_args():
     p.add_argument("--topk", type=int, default=10)
     p.add_argument("--strengths", type=str, default=None, help="Comma-separated strengths e.g. 1,1.5,2,2.5,3,4,5. If omitted uses 1.0..5.0 step 0.5")
     p.add_argument("--prompts-file", type=str, default=None, help="Optional JSONL file with diagnostic prompts (one JSON per line with 'prompt' or 'text' field)")
+    p.add_argument("--n-samples", type=int, default=None, help="Number of samples to use from each dataset.")
     p.add_argument("--cache-dir", type=str, default=".cache", help="Cache directory for downloads.")
     return p.parse_args()
 
@@ -59,8 +60,20 @@ def load_dataset_smart(path_or_id: str, cache_dir: str = ".cache"):
             # Not a local path, try as Hub ID directly
             ds = load_dataset(path_or_id)
 
-        if isinstance(ds, dict) and "train" in ds:
-            return ds["train"]
+        if isinstance(ds, dict):
+            if "train" in ds:
+                return ds["train"]
+            # Common variants
+            for k in ["train_prefs", "train_sft", "train_gen", "train_aligned"]:
+                if k in ds:
+                    print(f"Using split '{k}'")
+                    return ds[k]
+            
+            # If no known train split, return the first one
+            if len(ds) > 0:
+                first_split = next(iter(ds))
+                print(f"Warning: 'train' split not found. Using '{first_split}' split.")
+                return ds[first_split]
         return ds
     except Exception as e:
         print(f"Failed to load with datasets library: {e}. Falling back to simple JSONL loader.")
@@ -103,6 +116,11 @@ def main():
         try:
             j = json.loads(abl_log.read_text())
             source_model_path = j.get("source_model")
+            if source_model_path:
+                p = Path(source_model_path)
+                if not p.exists() or not (p / "config.json").exists():
+                    print(f"Warning: source_model path invalid (missing dir or config.json): {source_model_path}. Using model_dir instead.")
+                    source_model_path = None
         except Exception:
             source_model_path = None
 
@@ -116,6 +134,24 @@ def main():
     print("Loading datasets...")
     harmless = load_dataset_smart(args.harmless, args.cache_dir)
     harmful = load_dataset_smart(args.harmful, args.cache_dir)
+
+    if args.n_samples:
+        import itertools
+        # Handle HF Dataset slicing (which returns dict of lists if sliced directly)
+        if hasattr(harmless, "select"):
+            harmless = harmless.select(range(min(len(harmless), args.n_samples)))
+        elif isinstance(harmless, list):
+            harmless = harmless[:args.n_samples]
+        else:
+            harmless = list(itertools.islice(harmless, args.n_samples))
+            
+        if hasattr(harmful, "select"):
+            harmful = harmful.select(range(min(len(harmful), args.n_samples)))
+        elif isinstance(harmful, list):
+            harmful = harmful[:args.n_samples]
+        else:
+            harmful = list(itertools.islice(harmful, args.n_samples))
+        print(f"Truncated datasets to {args.n_samples} samples each.")
 
     # try load model config for hidden size and num layers
     cfg_path = Path(load_path) / "config.json"
