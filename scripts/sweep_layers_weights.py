@@ -155,6 +155,7 @@ def main():
     original_target_params = {k: v for k, v in base_map.items() if _is_target(k)}
 
     results = {"model": str(load_path), "top_layers": [], "trials": {}}
+    best_config = None
 
     for layer_idx, score in topk:
         # compute refusal vector for this layer
@@ -187,8 +188,20 @@ def main():
 
             # evaluate
             eval_res = evaluate_refusal_behavior(model, tokenizer, prompts)
-            print(f"Layer {layer_idx}  strength {s}: refusal_rate={eval_res['refusal_rate']}")
-            results["trials"][layer_key]["strengths"].append({"strength": float(s), "refusal_rate": float(eval_res.get("refusal_rate")), "total": int(eval_res.get("total",0)), "refused": int(eval_res.get("refused",0))})
+            refusal_rate = float(eval_res.get("refusal_rate"))
+            print(f"Layer {layer_idx}  strength {s}: refusal_rate={refusal_rate}")
+            results["trials"][layer_key]["strengths"].append({"strength": float(s), "refusal_rate": refusal_rate, "total": int(eval_res.get("total",0)), "refused": int(eval_res.get("refused",0))})
+
+            # Track best configuration (highest refusal rate, then lowest strength)
+            if best_config is None:
+                best_config = {"layer": layer_idx, "strength": s, "refusal_rate": refusal_rate}
+            else:
+                if refusal_rate > best_config["refusal_rate"]:
+                    best_config = {"layer": layer_idx, "strength": s, "refusal_rate": refusal_rate}
+                elif refusal_rate == best_config["refusal_rate"]:
+                    # Tie-breaker: prefer lower strength
+                    if float(s) < float(best_config["strength"]):
+                        best_config = {"layer": layer_idx, "strength": s, "refusal_rate": refusal_rate}
 
         # restore after finishing this layer
         for k, v in original_target_params.items():
@@ -201,6 +214,19 @@ def main():
     with open(outp, "w") as fh:
         json.dump(results, fh, indent=2)
     print(f"Wrote sweep results to {outp}")
+
+    if best_config:
+        print("\n" + "="*60)
+        print("RECOMMENDATION")
+        print("="*60)
+        print(f"Best configuration found:")
+        print(f"  Layer: {best_config['layer']}")
+        print(f"  Ablation Strength: {best_config['strength']}")
+        print(f"  Refusal Rate: {best_config['refusal_rate']:.2f}")
+        print("-" * 60)
+        print(f"To apply this configuration, run:")
+        print(f"python cli.py -m {load_path} --use-layer {best_config['layer']} --ablation-strength {best_config['strength']} ...")
+        print("="*60 + "\n")
 
 
 if __name__ == '__main__':
