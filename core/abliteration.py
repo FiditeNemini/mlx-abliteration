@@ -225,7 +225,7 @@ def calculate_refusal_direction(mean_harmful_activations: mx.array, mean_harmles
     return refusal_dir
 
 
-def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_modules: Optional[List[str]] = None, ablation_strength: float = 1.0, ablation_method: str = "projection") -> Dict:
+def get_ablated_parameters(model: nn.Module, refusal_vector: Any, target_modules: Optional[List[str]] = None, ablation_strength: Any = 1.0, ablation_method: str = "projection") -> Dict:
     """
     Orthogonalizes the weights of target modules with respect to the refusal vector.
 
@@ -235,11 +235,16 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
 
             w_ablated_float = w_float - ablation_strength * proj_W_on_v
         model (nn.Module): The model to modify.
-        refusal_vector (mx.array): The refusal direction vector.
+        refusal_vector (mx.array | Dict[int, mx.array]): The refusal direction vector(s).
+            Can be a single mx.array (applied to all layers) or a dictionary mapping
+            layer indices to specific refusal vectors.
         target_modules (Optional[List[str]]): A list of module names to target for
             ablation. Defaults to `["self_attn.o_proj", "mlp.down_proj", "mlp.c_proj"]`.
 
     Args:
+        ablation_strength (float | Dict[int, float]): The strength of the ablation.
+            Can be a single float (applied to all layers) or a dictionary mapping
+            layer indices to specific strengths. Defaults to 1.0.
         ablation_method (str): Either 'sequential' to subtract projections for each component
             sequentially (legacy behavior), or 'projection' to build a projection matrix
             P = sum_i v_i v_i^T and remove P @ W in one step. Defaults to 'projection'.
@@ -253,31 +258,35 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
         # targets match more models out of the box.
         target_modules = DEFAULT_TARGET_MODULES
 
-    # Support single-vector (shape [H]) or multiple components (shape [K, H])
-    # Ensure refusal_vector is an array with leading dimension = K (number of components)
-    rv = refusal_vector
-    if rv.ndim == 1:
-        rv = rv[None, :]
+    # Helper to prepare projection data for a given vector
+    def prepare_projection_data(rv):
+        if rv.ndim == 1:
+            rv = rv[None, :]
+        
+        v_norms = []
+        for i in range(rv.shape[0]):
+            v = rv[i]
+            v_norm = v / mx.maximum(mx.linalg.norm(v), 1e-9)
+            v_norms.append(v_norm)
+            
+        v_projs = [v[None, :].T for v in v_norms]
+        v_norm_Ts = [v[None, :] for v in v_norms]
+        
+        P = None
+        if ablation_method == "projection":
+            try:
+                P = sum((v[:, None] @ v[None, :]) for v in v_norms)
+            except Exception:
+                P = None
+        return P, v_projs, v_norm_Ts, v_norms
 
-    # Normalize each component
-    v_norms = []
-    for i in range(rv.shape[0]):
-        v = rv[i]
-        v_norm = v / mx.maximum(mx.linalg.norm(v), 1e-9)
-        v_norms.append(v_norm)
+    # Cache for projection data: key is layer_idx (or -1 for global)
+    # value is (P, v_projs, v_norm_Ts, v_norms)
+    proj_cache = {}
 
-    # Pre-calculate projection column vectors for each component
-    v_projs = [v[None, :].T for v in v_norms]  # each is [H,1]
-    v_norm_Ts = [v[None, :] for v in v_norms]  # each is [1,H]
-
-    # If using projection method, build P = sum_i v_i v_i^T
-    P = None
-    if ablation_method == "projection":
-        try:
-            # build projection matrix as sum outer products of unit vectors
-            P = sum((v[:, None] @ v[None, :]) for v in v_norms)
-        except Exception:
-            P = None
+    # Pre-calculate global projection if refusal_vector is not a dict
+    if not isinstance(refusal_vector, dict):
+        proj_cache[-1] = prepare_projection_data(refusal_vector)
 
     flat_params = tree_flatten(model.parameters())
     params_dict = dict(flat_params)
@@ -293,6 +302,42 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
         if not is_target:
             new_flat_params.append((key, W))
             continue
+
+        # Extract layer index from key
+        # Expected formats: "model.layers.X...", "layers.X..."
+        parts = key.split('.')
+        layer_idx = -1
+        try:
+            if parts[0] == "model" and parts[1] == "layers" and parts[2].isdigit():
+                layer_idx = int(parts[2])
+            elif parts[0] == "layers" and parts[1].isdigit():
+                layer_idx = int(parts[1])
+        except (IndexError, ValueError):
+            pass
+
+        # Determine refusal vector and strength for this layer
+        current_strength = ablation_strength
+        if isinstance(ablation_strength, dict):
+            current_strength = ablation_strength.get(layer_idx, 0.0)
+            
+        # Skip if strength is effectively zero
+        if abs(current_strength) < 1e-6:
+            new_flat_params.append((key, W))
+            continue
+
+        # Get projection data
+        if isinstance(refusal_vector, dict):
+            rv = refusal_vector.get(layer_idx)
+            if rv is None:
+                # No vector for this layer, skip
+                new_flat_params.append((key, W))
+                continue
+            
+            if layer_idx not in proj_cache:
+                proj_cache[layer_idx] = prepare_projection_data(rv)
+            P, v_projs, v_norm_Ts, v_norms = proj_cache[layer_idx]
+        else:
+            P, v_projs, v_norm_Ts, v_norms = proj_cache[-1]
 
         try:
             module = get_module_from_key(model, key)
@@ -375,13 +420,13 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
                         proj = proj + comp
                 if proj is None:
                     proj = mx.zeros_like(w_mat)
-                w_ablated_mat = w_mat - ablation_strength * proj
+                w_ablated_mat = w_mat - current_strength * proj
             else:
                 # Sequentially remove projections onto each component
                 w_ablated_mat = w_mat
                 for v_proj_i, v_norm_T_i in zip(v_projs, v_norm_Ts):
                     proj_W_on_v = v_proj_i @ (v_norm_T_i @ w_ablated_mat)
-                    w_ablated_mat = w_ablated_mat - ablation_strength * proj_W_on_v
+                    w_ablated_mat = w_ablated_mat - current_strength * proj_W_on_v
 
             # If we transposed earlier, transpose back
             if transposed:
@@ -447,12 +492,12 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
                         proj = proj + comp
                 if proj is None:
                     proj = mx.zeros_like(W_mat)
-                W_ablated_mat = W_mat - ablation_strength * proj
+                W_ablated_mat = W_mat - current_strength * proj
             else:
                 W_ablated_mat = W_mat
                 for v_proj_i, v_norm_T_i in zip(v_projs, v_norm_Ts):
                     proj_W_on_v = v_proj_i @ (v_norm_T_i @ W_ablated_mat)
-                    W_ablated_mat = W_ablated_mat - ablation_strength * proj_W_on_v
+                    W_ablated_mat = W_ablated_mat - current_strength * proj_W_on_v
 
             # transpose back if needed
             if transposed:
