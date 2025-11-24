@@ -13,7 +13,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Callable, Iterable
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -21,11 +21,22 @@ from mlx_lm.utils import tree_flatten
 from mlx.utils import tree_unflatten
 from safetensors import safe_open
 
-from .utils import get_module_from_key
+from .utils import get_module_from_key, find_probe_indices
 from mlx.nn.layers.quantized import QuantizedLinear
-from typing import Iterable
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TARGET_MODULES = [
+    "self_attn.o_proj",
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "mlp.down_proj",
+    "mlp.c_proj",
+    "mlp.up_proj",
+    "mlp.switch_mlp.down_proj",
+    "mlp.switch_mlp.up_proj",
+]
 
 
 class ActivationProbeWrapper(nn.Module):
@@ -51,20 +62,52 @@ class ActivationProbeWrapper(nn.Module):
                 (e.g., missing 'layers', 'embed_tokens', or 'norm').
         """
         super().__init__()
-        if hasattr(model, "model") and hasattr(model.model, "layers"):
-            base_model = model.model
+        
+        # Attempt to find the base model or container with layers
+        self.base_model = None
+        
+        # Prefer the inner model if it has both layers and embeddings
+        if hasattr(model, "model") and hasattr(model.model, "layers") and (hasattr(model.model, "embed_tokens") or hasattr(model.model, "wte")):
+            self.base_model = model.model
+        # Otherwise check the top level model
+        elif hasattr(model, "layers") and (hasattr(model, "embed_tokens") or hasattr(model, "wte")):
+            self.base_model = model
+        # Fallback: just look for layers
         elif hasattr(model, "layers"):
-            base_model = model
+            self.base_model = model
+        elif hasattr(model, "model") and hasattr(model.model, "layers"):
+            self.base_model = model.model
+        
+        # If not found, try to be more exhaustive or provide better error
+        if self.base_model is None:
+             available_attrs = list(model.__dict__.keys())
+             if hasattr(model, "model"):
+                 available_attrs.extend([f"model.{k}" for k in model.model.__dict__.keys()])
+             
+             raise AttributeError(
+                 f"The provided model does not have the expected structure. "
+                 f"Could not find '.layers' or '.model.layers'. "
+                 f"Available attributes: {available_attrs}"
+             )
+
+        # Now look for components in base_model
+        if hasattr(self.base_model, "embed_tokens"):
+            self.embedding = self.base_model.embed_tokens
+        elif hasattr(self.base_model, "wte"): # Common in some other archs
+            self.embedding = self.base_model.wte
         else:
-            raise AttributeError("The provided model does not have the expected structure to find '.layers'.")
+             raise AttributeError("Could not find embedding layer (expected 'embed_tokens' or 'wte').")
 
-        if not all(hasattr(base_model, attr) for attr in ["embed_tokens", "layers", "norm"]):
-            raise AttributeError("The model's structure is missing 'embed_tokens', 'layers', or 'norm'.")
+        self.model_layers = self.base_model.layers
+        
+        if hasattr(self.base_model, "norm"):
+            self.norm = self.base_model.norm
+        elif hasattr(self.base_model, "ln_f"): # GPT-2 style
+            self.norm = self.base_model.ln_f
+        else:
+             raise AttributeError("Could not find normalization layer (expected 'norm' or 'ln_f').")
 
-        self.embedding = base_model.embed_tokens
-        self.model_layers = base_model.layers
-        self.norm = base_model.norm
-        self.lm_head = getattr(model, "lm_head", getattr(base_model, "lm_head", None))
+        self.lm_head = getattr(model, "lm_head", getattr(self.base_model, "lm_head", None))
 
         if self.lm_head is None:
             logger.warning("Could not find 'lm_head'. Probing will proceed without returning logits.", extra={"extra_info": {"event": "missing_lm_head"}})
@@ -120,7 +163,10 @@ class ActivationProbeWrapper(nn.Module):
         cache = DummyCache()
 
         for i, layer in enumerate(self.model_layers):
-            output = layer(h, mask=mask, cache=cache)
+            # Create a fresh cache for each layer to avoid state leakage between layers
+            # (crucial for Mamba/Linear Attention models that store state in cache[0])
+            layer_cache = DummyCache()
+            output = layer(h, mask=mask, cache=layer_cache)
             h = output[0] if isinstance(output, tuple) else output
             if layers_to_probe is not None and i in layers_to_probe:
                 captured_activations[i] = h
@@ -205,17 +251,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
         # Include common naming variants used across model families (e.g.,
         # 'switch_mlp.down_proj' or 'mlp.up_proj') so default ablation
         # targets match more models out of the box.
-        target_modules = [
-            "self_attn.o_proj",
-            "self_attn.q_proj",
-            "self_attn.k_proj",
-            "self_attn.v_proj",
-            "mlp.down_proj",
-            "mlp.c_proj",
-            "mlp.up_proj",
-            "mlp.switch_mlp.down_proj",
-            "mlp.switch_mlp.up_proj",
-        ]
+        target_modules = DEFAULT_TARGET_MODULES
 
     # Support single-vector (shape [H]) or multiple components (shape [K, H])
     # Ensure refusal_vector is an array with leading dimension = K (number of components)
@@ -227,7 +263,7 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
     v_norms = []
     for i in range(rv.shape[0]):
         v = rv[i]
-        v_norm = v / (mx.linalg.norm(v) + 1e-9)
+        v_norm = v / mx.maximum(mx.linalg.norm(v), 1e-9)
         v_norms.append(v_norm)
 
     # Pre-calculate projection column vectors for each component
@@ -277,7 +313,36 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
                 continue
 
             # Dequantize, ablate, and then re-quantize
-            w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
+            try:
+                w_float = mx.dequantize(W, scales, biases, module.group_size, module.bits)
+            except Exception as e:
+                # Fallback for formats like mxfp4 where dequantize might fail due to types/biases
+                logger.warning(f"mx.dequantize failed for {key}: {e}. Attempting fallback via forward pass.", extra={"extra_info": {"event": "dequantize_fallback", "inputs": {"key": key}}})
+                try:
+                    # Infer input_dim from scales
+                    # scales shape is (out, in/group)
+                    out_dim = scales.shape[0]
+                    in_dim = scales.shape[1] * module.group_size
+                    
+                    # Create identity matrix (input_dim x input_dim)
+                    # Use float16 to save memory/time
+                    I = mx.eye(in_dim, dtype=mx.float16)
+                    
+                    # Forward pass: y = x @ W.T
+                    # I @ W.T = W.T
+                    # Note: module(I) uses the layer's forward pass which handles specific quantization modes
+                    w_T = module(I)
+                    
+                    # If the layer has an additive bias, subtract it
+                    if hasattr(module, "bias") and module.bias is not None:
+                        w_T = w_T - module.bias
+                        
+                    w_float = w_T.T
+                except Exception as e2:
+                    logger.error(f"Fallback dequantization failed for {key}: {e2}", extra={"extra_info": {"event": "dequantize_failed", "inputs": {"key": key}}})
+                    new_flat_params.append((key, W))
+                    continue
+
             # w_float may have shape (H, out) or (out, H) depending on layer layout.
             # Ensure we project along the hidden dimension (H) by transposing if needed.
             try:
@@ -342,6 +407,13 @@ def get_ablated_parameters(model: nn.Module, refusal_vector: mx.array, target_mo
 
         # Handle standard linear layers
         elif W.ndim == 2:
+            # Check if it's a floating point type to avoid processing packed weights (e.g. BitLinear)
+            # that don't inherit from QuantizedLinear but have 2D weight tensors.
+            if not (W.dtype == mx.float32 or W.dtype == mx.float16 or W.dtype == mx.bfloat16):
+                logger.warning(f"Skipping ablation for non-floating point weight {key} with dtype {W.dtype}", extra={"extra_info": {"event": "skip_non_float", "inputs": {"key": key, "dtype": str(W.dtype)}}})
+                new_flat_params.append((key, W))
+                continue
+
             # Project the weight matrix onto the refusal vector
             # Some weight matrices have shape (H, out) while others are (out, H).
             # We want to project along the hidden dimension H (length of refusal_vector).
@@ -774,3 +846,188 @@ def evaluate_refusal_behavior(model, tokenizer, prompts: Iterable[str], *, max_n
     refused = sum(1 for r in results if r.get("refused"))
     refusal_rate = (refused / total) if total > 0 else 0.0
     return {"total": total, "refused": refused, "refusal_rate": float(refusal_rate), "results": results}
+
+
+def get_mean_activations(
+    dataset: Iterable[Dict[str, Any]],
+    wrapper: ActivationProbeWrapper,
+    tokenizer: Any,
+    layers_to_probe: List[int],
+    config: Dict,
+    desc: str = "Probing activations",
+    progress_bar_fn: Optional[Callable[[Iterable, str], Iterable]] = None,
+    probe_marker: Optional[str] = None,
+    probe_mode: str = "follow-token",
+    probe_span: int = 1,
+    probe_debug: bool = False,
+    probe_debug_n: int = 3,
+    probe_debug_full: bool = False,
+) -> Tuple[Dict[int, mx.array], List[str]]:
+    """Computes mean activations for a given dataset using Welford's algorithm.
+
+    Args:
+        dataset: The dataset to process.
+        wrapper (ActivationProbeWrapper): The model wrapper for probing.
+        tokenizer (Any): The tokenizer.
+        layers_to_probe (List[int]): A list of layer indices to probe.
+        config (Dict): The model's configuration dictionary.
+        desc (str): A description for the progress bar.
+        progress_bar_fn (Optional[Callable]): Function to wrap the dataset iterator (e.g. tqdm).
+        probe_marker (Optional[str]): A string marker to find for probing.
+        probe_mode (str): Strategy to select tokens.
+        probe_span (int): Number of tokens to include for "thinking-span".
+        probe_debug (bool): Enable debug logging.
+        probe_debug_n (int): Number of debug samples.
+        probe_debug_full (bool): Show full tokens in debug.
+
+    Returns:
+        Tuple[Dict[int, mx.array], List[str]]: A tuple containing:
+            - A dictionary mapping layer indices to mean activations.
+            - A list of debug strings.
+    """
+    hidden_size = config["hidden_size"]
+    mean_activations = {layer: mx.zeros(hidden_size) for layer in layers_to_probe}
+    counts = {layer: 0 for layer in layers_to_probe}
+    max_seq_len = config.get("max_position_embeddings", 4096)
+
+    if probe_marker and probe_marker.strip():
+        marker_tokens = mx.array(tokenizer.encode(probe_marker, add_special_tokens=False))
+    else:
+        marker_tokens = None
+
+    # Track whether the marker was ever found in the dataset to avoid noisy per-item warnings
+    marker_found_any = False
+    # collect up to probe_debug_n sample prompts where marker wasn't found for diagnostics
+    sample_not_found_examples: list[tuple[str, list]] = []
+    # collect up to probe_debug_n tokenized samples to dump when probe_debug enabled
+    debug_tokenized_samples: list[tuple[str, list]] = []
+    debug_lines: list[str] = []
+
+    iterator = dataset
+    if progress_bar_fn:
+        iterator = progress_bar_fn(dataset, desc)
+
+    for item in iterator:
+        prompt = item.get("prompt") or item.get("text")
+        
+        # Handle chat-formatted datasets with "messages" key
+        if not prompt and "messages" in item:
+            # Extract user message content from messages list
+            messages = item["messages"]
+            if isinstance(messages, list):
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "user":
+                        prompt = msg.get("content")
+                        break
+        
+        if not prompt:
+            continue
+
+        tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
+        if len(tokens) > max_seq_len:
+            tokens = tokens[:max_seq_len]
+
+        _, captured = wrapper(tokens[None], mask=None, layers_to_probe=layers_to_probe)
+
+        token_list = tokens.tolist()
+        marker_list = marker_tokens.tolist() if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0 else None
+        
+        indices, found = find_probe_indices(token_list, marker_list, probe_mode, probe_span)
+        
+        probe_idx = -1
+        probe_idx_list = None
+        
+        if isinstance(indices, list):
+            probe_idx_list = indices
+        else:
+            probe_idx = indices
+
+        if found:
+            marker_found_any = True
+            if probe_debug and len(debug_lines) < probe_debug_n:
+                truncated = (prompt[:200] + '...') if len(prompt) > 200 else prompt
+                if probe_idx_list is not None:
+                    debug_lines.append(f"probe_idx_list={probe_idx_list}, prompt={truncated}")
+                else:
+                    debug_lines.append(f"probe_idx={probe_idx}, prompt={truncated}")
+
+        elif marker_list:
+            # store a small sample for diagnostics (prompt, tokens)
+            if len(sample_not_found_examples) < probe_debug_n:
+                try:
+                    sample_not_found_examples.append((prompt, token_list))
+                except Exception:
+                    pass
+
+            # If probe_debug is enabled, collect a few tokenized samples for inspection
+            if probe_debug and len(debug_tokenized_samples) < probe_debug_n:
+                try:
+                    token_strs = None
+                    # try to convert ids back to token strings if tokenizer supports it
+                    if hasattr(tokenizer, 'convert_ids_to_tokens'):
+                        try:
+                            token_strs = tokenizer.convert_ids_to_tokens(token_list)
+                        except Exception:
+                            token_strs = None
+                    debug_tokenized_samples.append((prompt, token_list if token_strs is None else token_strs))
+                except Exception:
+                    pass
+
+        for layer_idx, act in captured.items():
+            # decide indices to use (single index or list).
+            if probe_idx_list is not None:
+                # filter out-of-bounds indices
+                valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < act.shape[1]]
+                if valid_idxs:
+                    probe_act = act[0, valid_idxs, :].mean(axis=0)
+                else:
+                    probe_act = act[0, -1, :]
+            else:
+                # ensure probe_idx is within bounds; fallback to last token
+                use_idx = probe_idx if (0 <= probe_idx < act.shape[1]) else act.shape[1] - 1
+                probe_act = act[0, use_idx, :]
+            counts[layer_idx] += 1
+            delta = probe_act - mean_activations[layer_idx]
+            mean_activations[layer_idx] += delta / counts[layer_idx]
+        mx.eval(list(mean_activations.values()))
+
+    # If a probe marker was requested but never found in any example, warn once
+    if marker_tokens is not None and getattr(marker_tokens, 'size', 0) > 0 and not marker_found_any:
+        # Diagnostic summary: show the literal marker, its token ids, and a few sample tokenized prompts
+        try:
+            marker_list = marker_tokens.tolist()
+        except Exception:
+            marker_list = None
+
+        diag_lines = [f"Warning: Probe marker {repr(probe_marker)} not found in any items. Using last token for all examples."]
+        diag_lines.append(f"Marker token ids: {marker_list}")
+        if sample_not_found_examples:
+            diag_lines.append("Sample prompts (truncated) and token ids where marker was not found:")
+            for i, (s_prompt, s_tokens) in enumerate(sample_not_found_examples):
+                truncated = (s_prompt[:200] + '...') if len(s_prompt) > 200 else s_prompt
+                diag_lines.append(f"  [{i+1}] prompt: {truncated}")
+                diag_lines.append(f"       tokens (len={len(s_tokens)}): {s_tokens[:40]}{'...' if len(s_tokens)>40 else ''}")
+        
+        # Add to debug lines to be returned
+        debug_lines.extend(diag_lines)
+        
+        # Also log structured diagnostic
+        logger.warning("Probe marker not found diagnostic", extra={"extra_info": {"event": "probe_marker_not_found_diag", "marker": probe_marker, "marker_tokens": marker_list, "sample_count": len(sample_not_found_examples)}})
+
+    # If probe_debug is enabled, print the debug tokenization samples
+    if probe_debug and debug_tokenized_samples:
+        debug_lines.append("Probe debug samples (first {}):".format(len(debug_tokenized_samples)))
+        for i, (s_prompt, toks) in enumerate(debug_tokenized_samples):
+            truncated = (s_prompt[:200] + '...') if len(s_prompt) > 200 else s_prompt
+            debug_lines.append(f"  [{i+1}] prompt: {truncated}")
+            # toks may be token ids or token strings depending on tokenizer support
+            if probe_debug_full and isinstance(toks, (list, tuple)) and toks and isinstance(toks[0], str):
+                # already token strings
+                toks_display = toks
+            else:
+                toks_display = toks[:80] if isinstance(toks, (list, tuple)) else toks
+            toks_len = len(toks) if hasattr(toks, '__len__') else 'unknown'
+            debug_lines.append(f"       tokens/count: {toks_display}{'...' if isinstance(toks, (list, tuple)) and len(toks)>80 else ''} (len={toks_len})")
+        logger.info("Probe debug samples emitted", extra={"extra_info": {"event": "probe_debug_samples", "count": len(debug_tokenized_samples)}})
+
+    return mean_activations, debug_lines

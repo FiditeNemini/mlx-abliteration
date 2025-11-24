@@ -104,6 +104,7 @@ def make_args(tmp_path):
     a.probe_span = 1
     a.ablate_k = 1
     a.ablate_method = "projection"
+    a.refusal_dir_method = "difference"
     a.pca_sample = 8
     a.return_means = True
     return a

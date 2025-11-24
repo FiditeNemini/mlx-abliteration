@@ -91,3 +91,50 @@ def tokenizer_marker_diff(tokenizer: object, marker: str) -> dict:
     except Exception:
         result["tokens"] = None
     return result
+
+
+def find_probe_indices(
+    tokens: list[int],
+    marker_tokens: list[int] | None,
+    probe_mode: str = "follow-token",
+    probe_span: int = 1
+) -> int | list[int]:
+    """
+    Finds the token index/indices to probe based on a marker and mode.
+
+    Args:
+        tokens: The list of token IDs for the prompt.
+        marker_tokens: The list of token IDs for the marker. If None, defaults to last token.
+        probe_mode: Strategy to select tokens ("follow-token", "marker-token", "last-token", "thinking-span").
+        probe_span: Number of tokens to include for "thinking-span".
+
+    Returns:
+        tuple[int | list[int], bool]: A tuple containing:
+            - The index or list of indices to probe. Returns -1 (last token) if marker not found or mode is "last-token".
+            - A boolean indicating if the marker was found (always False for "last-token").
+    """
+    if probe_mode == "last-token" or not marker_tokens:
+        return len(tokens) - 1, False
+
+    # Search for the last occurrence of the marker by searching backwards
+    marker_len = len(marker_tokens)
+    for i in range(len(tokens) - marker_len, -1, -1):
+        if tokens[i : i + marker_len] == marker_tokens:
+            if probe_mode == "follow-token":
+                potential_idx = i + marker_len
+                # If marker is at the very end, fallback to the last token of the marker
+                return (potential_idx if potential_idx < len(tokens) else i + marker_len - 1), True
+            elif probe_mode == "marker-token":
+                return i + marker_len - 1, True
+            elif probe_mode == "thinking-span":
+                start = i + marker_len
+                if start < len(tokens):
+                    end = min(len(tokens), start + probe_span)
+                    return list(range(start, end)), True
+                else:
+                    # Fallback to marker token
+                    return i + marker_len - 1, True
+            break
+    
+    # Marker not found, fallback to last token
+    return len(tokens) - 1, False

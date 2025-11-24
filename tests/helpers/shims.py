@@ -26,6 +26,34 @@ class _MxCoreShim(types.ModuleType):
     def eval(_):
         return None
 
+    @staticmethod
+    def maximum(a, b):
+        return np.maximum(a, b)
+
+    @staticmethod
+    def sum(a, axis=None):
+        return np.sum(a, axis=axis)
+
+    @staticmethod
+    def allclose(a, b):
+        return np.allclose(a, b)
+
+    @staticmethod
+    def abs(a):
+        return np.abs(a)
+
+    @staticmethod
+    def stack(arrays, axis=0):
+        return np.stack(arrays, axis=axis)
+
+    @staticmethod
+    def dequantize(w, scales, biases, group_size, bits):
+        return np.array(w)
+
+    @staticmethod
+    def quantize(w, group_size, bits):
+        return np.array(w), np.array(w), np.array(w)
+
     class linalg:
         @staticmethod
         def norm(v):
