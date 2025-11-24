@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     abl_group.add_argument("--ablate-k", type=int, default=1, help="Number of principal components to ablate (1 = single vector).")
     abl_group.add_argument("--ablate-method", type=str, default="projection", choices=["projection", "sequential"], help="Method used to ablate components: 'projection' builds a projection matrix and removes the subspace in one step; 'sequential' subtracts projections component-by-component.")
     abl_group.add_argument("--refusal-dir-method", type=str, default="difference", choices=["difference", "projected"], help="Method to calculate refusal direction: 'difference' uses simple harmful-harmless difference; 'projected' removes harmless component from the refusal direction.")
+    abl_group.add_argument("--refusal-vector-policy", type=str, default="single", choices=["single", "per-layer"], help="Policy for refusal vector selection: 'single' uses the vector from --use-layer for all layers; 'per-layer' uses each layer's own refusal vector for ablation (Heretic style).")
     abl_group.add_argument("--pca-sample", type=int, default=512, help="Maximum number of per-example activations to collect for PCA when --ablate-k > 1.")
     abl_group.add_argument("--probe-debug", action="store_true", help="Enable probe debug output (dump tokenized prompts for first N examples).")
     abl_group.add_argument("--probe-debug-n", type=int, default=3, help="Number of sample prompts to dump when --probe-debug is set.")
@@ -285,137 +286,243 @@ def run_abliteration(args: argparse.Namespace):
             
     logging.info("Activation probing complete", extra={"extra_info": {"component": "cli", "event": "probing_end"}})
 
-    logging.info("Computing refusal vector", extra={"extra_info": {"component": "cli", "event": "vector_computation_start"}})
-    use_layer_idx = args.use_layer if args.use_layer >= 0 else num_layers + args.use_layer
-    if use_layer_idx not in layers_to_probe:
-        raise ValueError(f"Layer {use_layer_idx} was not in the list of probed layers.")
+    logging.info("Computing refusal vector(s)", extra={"extra_info": {"component": "cli", "event": "vector_computation_start"}})
+    
+    refusal_vector = None
+    norm_float = 0.0
 
-    logging.info(
-        f"Using activations from layer {use_layer_idx} for refusal direction.",
-        extra={
-            "extra_info": {
-                "component": "cli",
-                "event": "vector_computation_info",
-                "inputs": {"use_layer": use_layer_idx},
-            }
-        },
-    )
-    # If ablate_k > 1, compute top-k PCA components of (harmful - harmless) per-example activations
-    if args.ablate_k and args.ablate_k > 1:
-        import numpy as _np
-
-        # Collect per-example probe activations for the chosen layer using the same
-        # probe selection logic (marker, probe_mode, probe_span). Limit to args.pca_sample.
-        def collect_per_example_means(dataset, max_samples: int = 512):
-            res = []
-            collected = 0
-            if final_probe_marker and final_probe_marker.strip():
-                marker_tokens = mx.array(tokenizer.encode(final_probe_marker, add_special_tokens=False))
-                try:
-                    marker_list = marker_tokens.tolist()
-                except Exception:
+    if args.refusal_vector_policy == "per-layer":
+        logging.info("Using per-layer refusal vectors (Heretic style).", extra={"extra_info": {"component": "cli", "event": "vector_computation_info", "policy": "per-layer"}})
+        refusal_vector = {}
+        
+        # If ablate_k > 1, we need to do PCA per layer. This is expensive but necessary.
+        if args.ablate_k and args.ablate_k > 1:
+            import numpy as _np
+            import mlx.core as _mx
+            
+            # Helper to collect samples for a specific layer
+            def collect_samples_for_layer(dataset, layer_idx, max_samples=512):
+                res = []
+                collected = 0
+                if final_probe_marker and final_probe_marker.strip():
+                    marker_tokens = mx.array(tokenizer.encode(final_probe_marker, add_special_tokens=False))
+                    try:
+                        marker_list = marker_tokens.tolist()
+                    except Exception:
+                        marker_list = None
+                else:
+                    marker_tokens = None
                     marker_list = None
-            else:
-                marker_tokens = None
-                marker_list = None
 
-            for item in dataset:
-                if collected >= max_samples:
-                    break
-                prompt = item.get("prompt") or item.get("text")
-                
-                # Handle chat-formatted datasets with "messages" key
-                if not prompt and "messages" in item:
-                    # Extract user message content from messages list
-                    messages = item["messages"]
-                    if isinstance(messages, list):
-                        for msg in messages:
-                            if isinstance(msg, dict) and msg.get("role") == "user":
-                                prompt = msg.get("content")
-                                break
-                
-                if not prompt:
-                    continue
-                tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
-                if len(tokens) > model_config.get("max_position_embeddings", 4096):
-                    tokens = tokens[: model_config.get("max_position_embeddings", 4096)]
+                for item in dataset:
+                    if collected >= max_samples:
+                        break
+                    prompt = item.get("prompt") or item.get("text")
+                    if not prompt and "messages" in item:
+                        messages = item["messages"]
+                        if isinstance(messages, list):
+                            for msg in messages:
+                                if isinstance(msg, dict) and msg.get("role") == "user":
+                                    prompt = msg.get("content")
+                                    break
+                    if not prompt:
+                        continue
+                        
+                    tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
+                    if len(tokens) > model_config.get("max_position_embeddings", 4096):
+                        tokens = tokens[: model_config.get("max_position_embeddings", 4096)]
 
-                _, cap = wrapper(tokens[None], mask=None, layers_to_probe=[use_layer_idx])
-                arr = cap.get(use_layer_idx)
-                if arr is None:
-                    continue
+                    _, cap = wrapper(tokens[None], mask=None, layers_to_probe=[layer_idx])
+                    arr = cap.get(layer_idx)
+                    if arr is None:
+                        continue
 
-                # Decide probe index/span consistent with get_mean_activations
-                token_list = tokens.tolist()
-                indices, _ = find_probe_indices(token_list, marker_list, args.probe_mode, args.probe_span)
-                
-                probe_idx = -1
-                probe_idx_list = None
-                if isinstance(indices, list):
-                    probe_idx_list = indices
-                else:
-                    probe_idx = indices
-
-                # Extract vector according to chosen indices
-                if probe_idx_list is not None:
-                    valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < arr.shape[1]]
-                    if valid_idxs:
-                        vec = arr[0, valid_idxs, :].mean(axis=0)
+                    token_list = tokens.tolist()
+                    indices, _ = find_probe_indices(token_list, marker_list, args.probe_mode, args.probe_span)
+                    
+                    probe_idx = -1
+                    probe_idx_list = None
+                    if isinstance(indices, list):
+                        probe_idx_list = indices
                     else:
-                        vec = arr[0, -1, :]
-                else:
-                    use_idx = probe_idx if (0 <= probe_idx < arr.shape[1]) else arr.shape[1] - 1
-                    vec = arr[0, use_idx, :]
+                        probe_idx = indices
 
-                res.append(_np.asarray(vec))
-                collected += 1
+                    if probe_idx_list is not None:
+                        valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < arr.shape[1]]
+                        if valid_idxs:
+                            vec = arr[0, valid_idxs, :].mean(axis=0)
+                        else:
+                            vec = arr[0, -1, :]
+                    else:
+                        use_idx = probe_idx if (0 <= probe_idx < arr.shape[1]) else arr.shape[1] - 1
+                        vec = arr[0, use_idx, :]
 
-            if not res:
-                raise RuntimeError("Could not collect per-example activations for PCA")
-            return _np.stack(res, axis=0)
+                    res.append(_np.asarray(vec))
+                    collected += 1
+                if not res:
+                    return None
+                return _np.stack(res, axis=0)
 
-        harm_mat = collect_per_example_means(harmful_dataset, max_samples=args.pca_sample)
-        harm_mat_mean = harm_mat.mean(axis=0)
-        harm_centered = harm_mat - harm_mat_mean
-        harm_u, harm_s, harm_vt = _np.linalg.svd(harm_centered, full_matrices=False)
+            for layer_idx in tqdm(layers_to_probe, desc="Computing per-layer PCA"):
+                harm_mat = collect_samples_for_layer(harmful_dataset, layer_idx, max_samples=args.pca_sample)
+                if harm_mat is None: continue
+                
+                harm_mat_mean = harm_mat.mean(axis=0)
+                harm_centered = harm_mat - harm_mat_mean
+                harm_u, harm_s, harm_vt = _np.linalg.svd(harm_centered, full_matrices=False)
+                harm_components = harm_vt[: args.ablate_k]
+                
+                refusal_vector[layer_idx] = _mx.array(harm_components)
 
-        harm_components = harm_vt[: args.ablate_k]
-
-        harmless_mat = collect_per_example_means(harmless_dataset, max_samples=args.pca_sample)
-        harmless_mat_mean = harmless_mat.mean(axis=0)
-        harmless_centered = harmless_mat - harmless_mat_mean
-        harmless_u, harmless_s, harmless_vt = _np.linalg.svd(harmless_centered, full_matrices=False)
-
-        # Strategy: use the top-k components from harmful set
-        pc_vecs = _np.array(harm_components)
-        import mlx.core as _mx
-
-        refusal_vector = _mx.array(pc_vecs)
+        else:
+            # Standard difference/projected method per layer
+            for layer_idx in layers_to_probe:
+                refusal_vector[layer_idx] = calculate_refusal_direction(
+                    harmful_activations[layer_idx],
+                    harmless_activations[layer_idx],
+                    method=args.refusal_dir_method
+                )
+        
+        # Log average norm for summary
+        if refusal_vector:
+            norms = [float(mx.linalg.norm(v).item()) for v in refusal_vector.values()]
+            norm_float = sum(norms) / len(norms)
+            
     else:
-        refusal_vector = calculate_refusal_direction(
-            harmful_activations[use_layer_idx],
-            harmless_activations[use_layer_idx],
-            method=args.refusal_dir_method
+        # Original single-layer logic
+        use_layer_idx = args.use_layer if args.use_layer >= 0 else num_layers + args.use_layer
+        if use_layer_idx not in layers_to_probe:
+            raise ValueError(f"Layer {use_layer_idx} was not in the list of probed layers.")
+
+        logging.info(
+            f"Using activations from layer {use_layer_idx} for refusal direction.",
+            extra={
+                "extra_info": {
+                    "component": "cli",
+                    "event": "vector_computation_info",
+                    "inputs": {"use_layer": use_layer_idx},
+                }
+            },
         )
-    # Compute a safe float norm for logging (handles numpy floats or mx arrays)
-    try:
-        norm_val = mx.linalg.norm(refusal_vector)
+        # If ablate_k > 1, compute top-k PCA components of (harmful - harmless) per-example activations
+        if args.ablate_k and args.ablate_k > 1:
+            import numpy as _np
+
+            # Collect per-example probe activations for the chosen layer using the same
+            # probe selection logic (marker, probe_mode, probe_span). Limit to args.pca_sample.
+            def collect_per_example_means(dataset, max_samples: int = 512):
+                res = []
+                collected = 0
+                if final_probe_marker and final_probe_marker.strip():
+                    marker_tokens = mx.array(tokenizer.encode(final_probe_marker, add_special_tokens=False))
+                    try:
+                        marker_list = marker_tokens.tolist()
+                    except Exception:
+                        marker_list = None
+                else:
+                    marker_tokens = None
+                    marker_list = None
+
+                for item in dataset:
+                    if collected >= max_samples:
+                        break
+                    prompt = item.get("prompt") or item.get("text")
+                    
+                    # Handle chat-formatted datasets with "messages" key
+                    if not prompt and "messages" in item:
+                        # Extract user message content from messages list
+                        messages = item["messages"]
+                        if isinstance(messages, list):
+                            for msg in messages:
+                                if isinstance(msg, dict) and msg.get("role") == "user":
+                                    prompt = msg.get("content")
+                                    break
+                    
+                    if not prompt:
+                        continue
+                    tokens = mx.array(tokenizer.encode(prompt, add_special_tokens=False))
+                    if len(tokens) > model_config.get("max_position_embeddings", 4096):
+                        tokens = tokens[: model_config.get("max_position_embeddings", 4096)]
+
+                    _, cap = wrapper(tokens[None], mask=None, layers_to_probe=[use_layer_idx])
+                    arr = cap.get(use_layer_idx)
+                    if arr is None:
+                        continue
+
+                    # Decide probe index/span consistent with get_mean_activations
+                    token_list = tokens.tolist()
+                    indices, _ = find_probe_indices(token_list, marker_list, args.probe_mode, args.probe_span)
+                    
+                    probe_idx = -1
+                    probe_idx_list = None
+                    if isinstance(indices, list):
+                        probe_idx_list = indices
+                    else:
+                        probe_idx = indices
+
+                    # Extract vector according to chosen indices
+                    if probe_idx_list is not None:
+                        valid_idxs = [idx for idx in probe_idx_list if 0 <= idx < arr.shape[1]]
+                        if valid_idxs:
+                            vec = arr[0, valid_idxs, :].mean(axis=0)
+                        else:
+                            vec = arr[0, -1, :]
+                    else:
+                        use_idx = probe_idx if (0 <= probe_idx < arr.shape[1]) else arr.shape[1] - 1
+                        vec = arr[0, use_idx, :]
+
+                    res.append(_np.asarray(vec))
+                    collected += 1
+
+                if not res:
+                    raise RuntimeError("Could not collect per-example activations for PCA")
+                return _np.stack(res, axis=0)
+
+            harm_mat = collect_per_example_means(harmful_dataset, max_samples=args.pca_sample)
+            harm_mat_mean = harm_mat.mean(axis=0)
+            harm_centered = harm_mat - harm_mat_mean
+            harm_u, harm_s, harm_vt = _np.linalg.svd(harm_centered, full_matrices=False)
+
+            harm_components = harm_vt[: args.ablate_k]
+
+            harmless_mat = collect_per_example_means(harmless_dataset, max_samples=args.pca_sample)
+            harmless_mat_mean = harmless_mat.mean(axis=0)
+            harmless_centered = harmless_mat - harmless_mat_mean
+            harmless_u, harmless_s, harmless_vt = _np.linalg.svd(harmless_centered, full_matrices=False)
+
+            # Strategy: use the top-k components from harmful set
+            pc_vecs = _np.array(harm_components)
+            import mlx.core as _mx
+
+            refusal_vector = _mx.array(pc_vecs)
+        else:
+            refusal_vector = calculate_refusal_direction(
+                harmful_activations[use_layer_idx],
+                harmless_activations[use_layer_idx],
+                method=args.refusal_dir_method
+            )
+        # Compute a safe float norm for logging (handles numpy floats or mx arrays)
         try:
-            norm_float = float(norm_val.item())
+            norm_val = mx.linalg.norm(refusal_vector)
+            try:
+                norm_float = float(norm_val.item())
+            except Exception:
+                norm_float = float(norm_val)
         except Exception:
-            norm_float = float(norm_val)
-    except Exception:
-        # Fallback: try plain float conversion
-        try:
-            norm_float = float(refusal_vector)
-        except Exception:
-            norm_float = 0.0
+            # Fallback: try plain float conversion
+            try:
+                norm_float = float(refusal_vector)
+            except Exception:
+                norm_float = 0.0
 
     logging.info("Refusal vector computed", extra={"extra_info": {"component": "cli", "event": "vector_computation_end", "actual_output": {"refusal_vector_norm": norm_float}}})
 
     logging.info("Orthogonalizing weights and updating model", extra={"extra_info": {"component": "cli", "event": "orthogonalization_start"}})
     adaptive_result = None
     if getattr(args, "adaptive", False):
+        if args.refusal_vector_policy == "per-layer":
+            raise ValueError("Adaptive ablation is not currently supported with --refusal-vector-policy per-layer.")
+            
         from core.adaptive import adaptive_search_ablation_strength
         logging.info(
             "Starting adaptive ablation strength search",
@@ -477,12 +584,17 @@ def run_abliteration(args: argparse.Namespace):
         logging.info("Model parameters updated", extra={"extra_info": {"component": "cli", "event": "orthogonalization_end"}})
 
     logging.info("Saving abliterated model", extra={"extra_info": {"component": "cli", "event": "saving_start"}})
+    
+    # Handle logging for per-layer policy where use_layer_idx might not be defined
+    log_layer_idx = use_layer_idx if args.refusal_vector_policy == "single" else "per-layer"
+    
     abliteration_log = {
         "source_model": args.model,
         "harmless_dataset": args.harmless_dataset,
         "harmful_dataset": args.harmful_dataset,
         "probed_layers": layers_to_probe,
-        "ablation_vector_from_layer": use_layer_idx,
+        "ablation_vector_from_layer": log_layer_idx,
+        "refusal_vector_policy": args.refusal_vector_policy,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "refusal_vector_norm": norm_float,
         "adaptive": bool(getattr(args, "adaptive", False)),
